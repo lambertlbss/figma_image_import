@@ -1,261 +1,1178 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 13px;
-      color: #333;
-      background: #fff;
-      padding: 16px;
-      width: 320px;
+    :root {
+      --ink: #171918;
+      --muted: #70756f;
+      --paper: #f4f4f0;
+      --panel: #ffffff;
+      --line: #d9dbd5;
+      --line-strong: #bfc3bb;
+      --blue: #1668e3;
+      --blue-dark: #0e4ca8;
+      --green: #198754;
+      --orange: #b85c00;
+      --red: #c33b2f;
+      --purple: #7252b8;
+      --shadow: 0 8px 24px rgba(24, 31, 25, 0.08);
     }
-    h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
-    button {
-      width: 100%;
-      padding: 9px;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 500;
-    }
-    #pickBtn { background: #18a0fb; color: #fff; margin-bottom: 10px; }
-    #pickBtn:disabled { background: #aaa; cursor: not-allowed; }
-    #importBtn { background: #1bc47d; color: #fff; display: none; margin-top: 10px; }
-    #importBtn:disabled { background: #aaa; cursor: not-allowed; }
-    #status { font-size: 12px; color: #666; min-height: 18px; margin-bottom: 8px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
 
-    /* 子文件夹选择区 */
-    #folderList {
-      display: none;
-      border: 1px solid #e0e0e0;
-      border-radius: 6px;
-      overflow: hidden;
-      margin-bottom: 4px;
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      min-height: 100%;
+      margin: 0;
     }
-    #folderList-header {
+
+    body {
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(23, 25, 24, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 25, 24, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 16px 16px;
+      font-family: Aptos, "Segoe UI Variable", "Segoe UI", sans-serif;
+      font-size: 12px;
+    }
+
+    button, input { font: inherit; }
+
+    button {
+      border: 0;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+
+    .app {
+      height: 620px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .masthead {
+      position: relative;
+      padding: 18px 18px 16px;
+      color: #f9faf7;
+      background: #1b211d;
+      overflow: hidden;
+    }
+
+    .masthead::after {
+      content: "SYNC";
+      position: absolute;
+      right: -8px;
+      top: -18px;
+      color: rgba(255, 255, 255, 0.045);
+      font-family: Bahnschrift, "Arial Narrow", sans-serif;
+      font-size: 72px;
+      font-weight: 800;
+      letter-spacing: -5px;
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 7px;
+      color: #aeb8b0;
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: 9px;
+      letter-spacing: 1.6px;
+      text-transform: uppercase;
+    }
+
+    .pulse {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #78e09e;
+      box-shadow: 0 0 0 4px rgba(120, 224, 158, 0.12);
+    }
+
+    h1 {
+      position: relative;
+      z-index: 1;
+      margin: 0;
+      font-family: Bahnschrift, "Arial Narrow", sans-serif;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+
+    .subtitle {
+      position: relative;
+      z-index: 1;
+      margin-top: 4px;
+      color: #b8c0ba;
+      font-size: 11px;
+    }
+
+    .workspace {
+      flex: 1;
+      padding: 14px;
+      overflow-y: auto;
+    }
+
+    .pick-button {
+      width: 100%;
+      min-height: 42px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 10px;
-      background: #f5f5f5;
-      border-bottom: 1px solid #e0e0e0;
-      font-size: 11px;
-      color: #666;
+      padding: 0 13px;
+      color: #fff;
+      background: var(--blue);
+      border: 1px solid var(--blue-dark);
+      border-radius: 7px;
+      box-shadow: 0 4px 0 var(--blue-dark);
+      font-weight: 650;
+      transition: transform 120ms ease, box-shadow 120ms ease;
     }
-    #folderList-header a {
-      color: #18a0fb;
-      cursor: pointer;
-      text-decoration: none;
-      font-size: 11px;
+
+    .pick-button:not(:disabled):active {
+      transform: translateY(3px);
+      box-shadow: 0 1px 0 var(--blue-dark);
     }
-    #folderItems {
-      max-height: 180px;
-      overflow-y: auto;
+
+    .pick-button .hint {
+      font-family: Consolas, monospace;
+      font-size: 10px;
+      font-weight: 400;
+      opacity: 0.72;
     }
-    .folder-item {
+
+    .status-line {
+      min-height: 18px;
+      margin: 10px 2px 0;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .status-line.error { color: var(--red); }
+    .status-line.success { color: var(--green); }
+
+    .scan-progress {
+      display: none;
+      margin-top: 10px;
+    }
+
+    progress {
+      width: 100%;
+      height: 6px;
+      display: block;
+      overflow: hidden;
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      background: #dde0da;
+    }
+
+    progress::-webkit-progress-bar { background: #dde0da; }
+    progress::-webkit-progress-value { background: var(--blue); }
+
+    .progress-meta {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 5px;
+      color: var(--muted);
+      font-family: Consolas, monospace;
+      font-size: 9px;
+    }
+
+    .plan {
+      display: none;
+      margin-top: 13px;
+      animation: rise 180ms ease-out both;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .root-card {
       display: flex;
       align-items: center;
-      padding: 5px 10px;
-      border-bottom: 1px solid #f0f0f0;
+      gap: 10px;
+      padding: 10px 11px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      box-shadow: var(--shadow);
+    }
+
+    .folder-mark {
+      width: 30px;
+      height: 25px;
+      position: relative;
+      flex: 0 0 auto;
+      border: 2px solid #202622;
+      border-radius: 4px;
+      background: #e8d56d;
+    }
+
+    .folder-mark::before {
+      content: "";
+      position: absolute;
+      left: -2px;
+      top: -7px;
+      width: 13px;
+      height: 7px;
+      border: 2px solid #202622;
+      border-bottom: 0;
+      border-radius: 4px 4px 0 0;
+      background: #e8d56d;
+    }
+
+    .root-copy { min-width: 0; flex: 1; }
+
+    .root-label {
+      color: var(--muted);
+      font-family: Consolas, monospace;
+      font-size: 9px;
+      letter-spacing: 0.7px;
+      text-transform: uppercase;
+    }
+
+    .root-name {
+      overflow: hidden;
+      margin-top: 2px;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .adopted {
+      color: var(--purple);
+      font-family: Consolas, monospace;
+      font-size: 9px;
+      white-space: nowrap;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 5px;
+      margin-top: 9px;
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 8px 4px 7px;
+      text-align: center;
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+
+    .metric strong {
+      display: block;
+      font-family: Bahnschrift, sans-serif;
+      font-size: 17px;
+      line-height: 1;
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 9px;
+    }
+
+    .metric.add strong { color: var(--green); }
+    .metric.update strong { color: var(--orange); }
+    .metric.delete strong { color: var(--red); }
+    .metric.move strong { color: var(--purple); }
+
+    .section-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 13px 2px 6px;
+      color: #3d423e;
+      font-family: Consolas, monospace;
+      font-size: 9px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+
+    .section-heading-actions {
+      display: flex;
+      align-items: center;
       gap: 8px;
+    }
+
+    .bulk-select-button {
+      min-width: 48px;
+      padding: 3px 7px;
+      color: var(--blue);
+      background: #fff;
+      border: 1px solid #a9c6ee;
+      border-radius: 4px;
+      font-family: Aptos, "Segoe UI Variable", "Segoe UI", sans-serif;
+      font-size: 9px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .bulk-select-button:not(:disabled):hover { background: #edf5ff; }
+
+    .folder-list {
+      max-height: 206px;
+      overflow-y: auto;
+      background: var(--panel);
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      box-shadow: var(--shadow);
+    }
+
+    .folder-row {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      min-height: 38px;
+      padding: 6px 9px;
+      border-bottom: 1px solid #eceee9;
       cursor: pointer;
       user-select: none;
     }
-    .folder-item:last-child { border-bottom: none; }
-    .folder-item:hover { background: #f8f8f8; }
-    .folder-item input[type=checkbox] { cursor: pointer; flex-shrink: 0; }
-    .folder-name { font-weight: 600; flex: 1; }
-    .folder-count { color: #aaa; font-size: 11px; flex-shrink: 0; }
 
-    /* 进度 */
-    #progress { display: none; margin-top: 10px; }
-    progress { width: 100%; height: 6px; border-radius: 3px; appearance: none; }
-    progress::-webkit-progress-bar { background: #eee; border-radius: 3px; }
-    progress::-webkit-progress-value { background: #18a0fb; border-radius: 3px; }
-    .progress-label { font-size: 11px; color: #888; margin-top: 4px; text-align: center; }
+    .folder-row:last-child { border-bottom: 0; }
+    .folder-row:hover { background: #f7f8f4; }
+
+    .folder-row input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: var(--blue);
+    }
+
+    .folder-info { min-width: 0; }
+
+    .folder-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .folder-path {
+      overflow: hidden;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .badge {
+      flex: 0 0 auto;
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-family: Consolas, monospace;
+      font-size: 8px;
+      font-weight: 700;
+    }
+
+    .badge.existing { color: #145aa8; background: #e4f0ff; }
+    .badge.new { color: #166a42; background: #dff5e9; }
+    .badge.removed { color: #9f2d24; background: #fee7e4; }
+
+    .folder-counts {
+      margin-top: 3px;
+      color: var(--muted);
+      font-family: Consolas, monospace;
+      font-size: 9px;
+    }
+
+    .folder-total {
+      color: #595f5a;
+      font-family: Consolas, monospace;
+      font-size: 9px;
+    }
+
+    .delete-option {
+      display: none;
+      align-items: flex-start;
+      gap: 8px;
+      margin-top: 9px;
+      padding: 9px 10px;
+      color: #71312b;
+      background: #fff3f1;
+      border: 1px solid #e8bdb7;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .delete-option input {
+      margin: 1px 0 0;
+      accent-color: var(--red);
+    }
+
+    .delete-option strong { display: block; font-size: 10px; }
+    .delete-option small { display: block; margin-top: 2px; color: #94645f; line-height: 1.35; }
+
+    .conflict-note {
+      display: none;
+      margin-top: 8px;
+      padding: 8px 9px;
+      color: #6a4c16;
+      background: #fff7df;
+      border: 1px solid #e5cf8f;
+      border-radius: 6px;
+      line-height: 1.4;
+    }
+
+    .footer {
+      padding: 11px 14px 14px;
+      background: rgba(244, 244, 240, 0.96);
+      border-top: 1px solid var(--line);
+    }
+
+    .sync-button {
+      width: 100%;
+      min-height: 42px;
+      color: #fff;
+      background: #1d2821;
+      border: 1px solid #0c100d;
+      border-radius: 7px;
+      box-shadow: 0 4px 0 #0c100d;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+
+    .sync-button:not(:disabled):active {
+      transform: translateY(3px);
+      box-shadow: 0 1px 0 #0c100d;
+    }
+
+    .footer-note {
+      min-height: 14px;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.4;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
-  <h2>图片文件夹导入 Figma</h2>
-  <input type="file" id="folderInput" webkitdirectory multiple accept=".png" style="display:none" />
-  <button id="pickBtn">选择文件夹</button>
-  <div id="status">请选择包含图片的文件夹（支持 PNG）</div>
+  <div class="app">
+    <header class="masthead">
+      <div class="eyebrow"><span class="pulse"></span>Image Library Operator</div>
+      <h1>资源增量同步</h1>
+      <div class="subtitle">自动识别新增、更新、删除与未变化内容</div>
+    </header>
 
-  <!-- 子文件夹勾选列表 -->
-  <div id="folderList">
-    <div id="folderList-header">
-      <span>选择要导入的子文件夹</span>
-      <span><a id="selectAll">全选</a> / <a id="selectNone">全不选</a></span>
-    </div>
-    <div id="folderItems"></div>
-  </div>
+    <main class="workspace">
+      <input id="folderInput" type="file" webkitdirectory multiple accept=".png,image/png" hidden />
+      <button id="pickButton" class="pick-button" type="button">
+        <span>选择资源根目录</span>
+        <span class="hint">PNG / FOLDER</span>
+      </button>
+      <div id="statusLine" class="status-line">选择文件夹后会先扫描差异，不会立即修改画布。</div>
 
-  <button id="importBtn">开始导入</button>
+      <div id="scanProgress" class="scan-progress">
+        <progress id="progressBar" value="0" max="100"></progress>
+        <div class="progress-meta">
+          <span id="progressLabel">准备扫描</span>
+          <span id="progressPercent">0%</span>
+        </div>
+      </div>
 
-  <div id="progress">
-    <progress id="progressBar" value="0" max="100"></progress>
-    <div class="progress-label" id="progressLabel"></div>
+      <section id="plan" class="plan">
+        <div class="root-card">
+          <span class="folder-mark" aria-hidden="true"></span>
+          <div class="root-copy">
+            <div class="root-label">Selected root</div>
+            <div id="rootName" class="root-name"></div>
+          </div>
+          <div id="adoptedCount" class="adopted"></div>
+        </div>
+
+        <div class="summary">
+          <div class="metric add"><strong id="countAdd">0</strong><span>新增</span></div>
+          <div class="metric update"><strong id="countUpdate">0</strong><span>更新</span></div>
+          <div class="metric delete"><strong id="countDelete">0</strong><span>删除</span></div>
+          <div class="metric move"><strong id="countMove">0</strong><span>移动</span></div>
+          <div class="metric"><strong id="countUnchanged">0</strong><span>未变化</span></div>
+        </div>
+
+        <div class="section-heading">
+          <span>Folder classification</span>
+          <div class="section-heading-actions">
+            <span id="selectedFolderCount">0 selected</span>
+            <button id="toggleAllFolders" class="bulk-select-button" type="button" disabled>全选</button>
+          </div>
+        </div>
+        <div id="folderList" class="folder-list"></div>
+
+        <label id="deleteOption" class="delete-option">
+          <input id="deleteMissing" type="checkbox" checked />
+          <span>
+            <strong>同步本地删除操作</strong>
+            <small>只删除由本插件管理、且本地已经不存在的资源。</small>
+          </span>
+        </label>
+
+        <div id="conflictNote" class="conflict-note"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <button id="syncButton" class="sync-button" type="button" disabled>等待扫描</button>
+      <div id="footerNote" class="footer-note">未变化的 Component 不会被重写或移动</div>
+    </footer>
   </div>
 
   <script>
-    // allImages: 扫描到的全部图片 { name, section, file }
-    // sectionStats: { sectionName: count }
-    let allImages = [];
-    let sectionStats = {};
-    let isImporting = false;
+    const folderInput = document.getElementById('folderInput');
+    const pickButton = document.getElementById('pickButton');
+    const syncButton = document.getElementById('syncButton');
+    const statusLine = document.getElementById('statusLine');
+    const scanProgress = document.getElementById('scanProgress');
+    const progressBar = document.getElementById('progressBar');
+    const progressLabel = document.getElementById('progressLabel');
+    const progressPercent = document.getElementById('progressPercent');
+    const planElement = document.getElementById('plan');
+    const folderList = document.getElementById('folderList');
+    const toggleAllFolders = document.getElementById('toggleAllFolders');
+    const deleteOption = document.getElementById('deleteOption');
+    const deleteMissing = document.getElementById('deleteMissing');
+    const conflictNote = document.getElementById('conflictNote');
 
-    const folderInput  = document.getElementById('folderInput');
-    const pickBtn      = document.getElementById('pickBtn');
-    const importBtn    = document.getElementById('importBtn');
-    const statusEl     = document.getElementById('status');
-    const folderListEl = document.getElementById('folderList');
-    const folderItemsEl= document.getElementById('folderItems');
-    const progressEl   = document.getElementById('progress');
-    const progressBar  = document.getElementById('progressBar');
-    const progressLabel= document.getElementById('progressLabel');
+    const counters = {
+      add: document.getElementById('countAdd'),
+      update: document.getElementById('countUpdate'),
+      delete: document.getElementById('countDelete'),
+      move: document.getElementById('countMove'),
+      unchanged: document.getElementById('countUnchanged')
+    };
 
-    function setStatus(msg) { statusEl.textContent = msg; }
+    let requestSequence = 0;
+    const pendingRequests = new Map();
+    let currentPlan = null;
+    let fileByPath = new Map();
+    let selectedFolders = new Set();
+    let isBusy = false;
+    let syncComplete = false;
+    const REQUEST_TIMEOUT_MS = 600000;
+    const APPLY_BATCH_TIMEOUT_MS = 180000;
+    const APPLY_BATCH_MAX_FILES = 48;
+    const APPLY_BATCH_MAX_BYTES = 12 * 1024 * 1024;
+    const APPLY_BATCH_SMALL_FILE_BYTES = 128 * 1024;
+    const APPLY_BATCH_MEDIUM_FILE_BYTES = 512 * 1024;
+    const HEADER_CONCURRENCY = 12;
+    const HASH_CONCURRENCY = 6;
 
-    // ── 选择文件夹 ──────────────────────────────────────────────
-    pickBtn.addEventListener('click', () => { if (!isImporting) folderInput.click(); });
-
-    folderInput.addEventListener('change', () => {
-      const files = Array.from(folderInput.files);
-      allImages = [];
-      sectionStats = {};
-      folderListEl.style.display = 'none';
-      importBtn.style.display = 'none';
-
-      for (const file of files) {
-        if (!file.name.toLowerCase().endsWith('.png')) continue;
-        const parts = file.webkitRelativePath.split('/');
-        // parts[0]=根目录, parts[1]=二级文件夹（section）
-        const section = parts.length >= 3 ? parts[1] : '_root';
-        allImages.push({ name: file.name.replace(/\.[^.]+$/, ''), section, file });
-        sectionStats[section] = (sectionStats[section] || 0) + 1;
-      }
-
-      if (allImages.length === 0) {
-        setStatus('未找到 PNG 图片，请重新选择文件夹。');
+    window.addEventListener('message', (event) => {
+      const message = event.data && event.data.pluginMessage;
+      if (!message) return;
+      if (message.type === 'sync-progress') {
+        showFileStage(message);
         return;
       }
-
-      // 渲染子文件夹勾选列表
-      const sections = Object.keys(sectionStats).sort();
-      folderItemsEl.innerHTML = sections.map(s => `
-        <label class="folder-item">
-          <input type="checkbox" class="section-cb" value="${s}" checked />
-          <span class="folder-name">${s}</span>
-          <span class="folder-count">${sectionStats[s]} 张</span>
-        </label>
-      `).join('');
-
-      folderListEl.style.display = 'block';
-      importBtn.style.display = 'block';
-      setStatus(`共找到 ${allImages.length} 张图片，请勾选要导入的子文件夹：`);
+      if (!message.replyTo) return;
+      const pending = pendingRequests.get(message.replyTo);
+      if (!pending) return;
+      pendingRequests.delete(message.replyTo);
+      clearTimeout(pending.timer);
+      if (message.ok) pending.resolve(message.data);
+      else pending.reject(new Error(message.error || '插件处理失败'));
     });
 
-    // 全选 / 全不选
-    document.getElementById('selectAll').addEventListener('click', () =>
-      document.querySelectorAll('.section-cb').forEach(cb => cb.checked = true));
-    document.getElementById('selectNone').addEventListener('click', () =>
-      document.querySelectorAll('.section-cb').forEach(cb => cb.checked = false));
-
-    // ── 开始导入 ────────────────────────────────────────────────
-    importBtn.addEventListener('click', async () => {
-      if (isImporting) return;
-
-      const selected = new Set(
-        Array.from(document.querySelectorAll('.section-cb:checked')).map(cb => cb.value)
-      );
-      if (selected.size === 0) { setStatus('请至少选择一个子文件夹。'); return; }
-
-      const images = allImages.filter(img => selected.has(img.section));
-      if (images.length === 0) { setStatus('所选文件夹中没有图片。'); return; }
-
-      isImporting = true;
-      pickBtn.disabled = true;
-      importBtn.disabled = true;
-      progressEl.style.display = 'block';
-      progressBar.value = 0;
-
-      // 按 section 分组排序，同 section 的连续发送
-      images.sort((a, b) => a.section < b.section ? -1 : a.section > b.section ? 1 : 0);
-
-      const total = images.length;
-      let processed = 0;
-      let aborted = false;
-
-      // 逐张发送，附带是否为该 section 最后一张的标记
-      for (let i = 0; i < images.length; i++) {
-        if (aborted) break;
-
-        const img = images[i];
-        const isLast = i === images.length - 1;
-        const nextSection = (i + 1 < images.length) ? images[i + 1].section : null;
-        const isSectionLast = nextSection !== img.section; // 该 section 的最后一张
-
-        const buf = await img.file.arrayBuffer();
-
-        parent.postMessage({
-          pluginMessage: {
-            type: 'import-one',
-            name: img.name,
-            section: img.section,
-            isLast,
-            isSectionLast,
-            bytes: buf
-          }
-        }, '*');
-
-        processed++;
-        progressBar.value = Math.round((processed / total) * 100);
-        progressLabel.textContent = `处理中 ${processed} / ${total}`;
-
-        // 等 code.js 回 ack 或 error
-        const result = await waitForAck();
-        if (result === 'error') { aborted = true; break; }
-      }
-    });
-
-    function waitForAck() {
-      return new Promise(resolve => {
-        const h = e => {
-          const type = e.data?.pluginMessage?.type;
-          if (type === 'batch-ack' || type === 'done') {
-            window.removeEventListener('message', h);
-            resolve('ok');
-          } else if (type === 'error') {
-            window.removeEventListener('message', h);
-            resolve('error');
-          }
-        };
-        window.addEventListener('message', h);
+    function request(type, payload, timeoutMs = REQUEST_TIMEOUT_MS) {
+      const requestId = `req-${Date.now()}-${++requestSequence}`;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingRequests.delete(requestId);
+          reject(new Error(`${type} 阶段响应超时（${Math.round(timeoutMs / 60000)} 分钟），请重试。`));
+        }, timeoutMs);
+        pendingRequests.set(requestId, { resolve, reject, timer });
+        // Figma's plugin bridge expects a regular structured-clone message.
+        // Transfer lists can leave the first apply-file request unanswered.
+        parent.postMessage({ pluginMessage: { type, requestId, payload } }, '*');
       });
     }
 
-    // ── 来自 code.js 的消息 ─────────────────────────────────────
-    window.addEventListener('message', e => {
-      const msg = e.data?.pluginMessage;
-      if (!msg) return;
-      if (msg.type === 'done') {
-        progressBar.value = 100;
-        progressLabel.textContent = '导入完成！';
-        setStatus(`成功导入 ${msg.total} 个 Component，共 ${msg.sections} 个 Section。`);
-        isImporting = false;
-        pickBtn.disabled = false;
-        importBtn.disabled = false;
-      } else if (msg.type === 'error') {
-        setStatus('导入出错：' + msg.message);
-        isImporting = false;
-        pickBtn.disabled = false;
-        importBtn.disabled = false;
-      }
+    pickButton.addEventListener('click', () => {
+      if (isBusy) return;
+      folderInput.value = '';
+      folderInput.click();
     });
+
+    folderInput.addEventListener('change', () => scanSelectedFolder());
+    syncButton.addEventListener('click', () => startSync());
+    toggleAllFolders.addEventListener('click', () => toggleFolderSelection());
+    deleteMissing.addEventListener('change', () => updateSelectedSummary());
+
+    async function scanSelectedFolder() {
+      const pngFiles = Array.from(folderInput.files || []).filter((file) =>
+        file.name.toLowerCase().endsWith('.png')
+      );
+      if (pngFiles.length === 0) {
+        setStatus('未找到 PNG 文件，请重新选择资源文件夹。', 'error');
+        return;
+      }
+
+      setBusy(true);
+      resetPlan();
+      showProgress(true);
+      setProgress(0, '读取文件目录');
+      fileByPath = new Map();
+
+      try {
+        const scanStartedAt = performance.now();
+        const firstParts = splitRelativePath(pngFiles[0]);
+        const rootName = firstParts.length > 1 ? firstParts[0] : 'resources';
+        const draftManifest = new Array(pngFiles.length);
+        let invalidCount = 0;
+        let inspectedCount = 0;
+
+        await mapWithConcurrency(pngFiles, HEADER_CONCURRENCY, async (file, index) => {
+          try {
+            const parts = splitRelativePath(file);
+            const relativeParts = parts.length > 1 ? parts.slice(1) : [file.name];
+            const relativePath = relativeParts.join('/');
+            const folderPath = relativeParts.length > 1 ? relativeParts[0] : '_root';
+            const header = await file.slice(0, 24).arrayBuffer();
+            const dimensions = readPngDimensions(header);
+            draftManifest[index] = {
+              relativePath,
+              folderPath,
+              name: file.name.replace(/\.[^.]+$/, ''),
+              hash: '',
+              width: dimensions.width,
+              height: dimensions.height,
+              sourceSize: file.size,
+              lastModified: file.lastModified
+            };
+            fileByPath.set(relativePath, file);
+          } catch (_) {
+            invalidCount++;
+          } finally {
+            inspectedCount++;
+            const percent = Math.round((inspectedCount / pngFiles.length) * 30);
+            setProgress(percent, `读取 PNG 信息 ${inspectedCount} / ${pngFiles.length}`);
+          }
+        });
+        const headerFinishedAt = performance.now();
+
+        const validManifest = draftManifest.filter(Boolean);
+        const manifest = dedupeNewestResources(validManifest);
+        const duplicateNameCount = validManifest.length - manifest.length;
+        if (manifest.length === 0) throw new Error('文件夹中没有有效的 PNG 图片。');
+        setProgress(34, '快速比对 Figma 资源索引');
+        const preflightStartedAt = performance.now();
+        const preflight = await request('prepare-scan', { rootName, manifest });
+        const preflightFinishedAt = performance.now();
+        const knownHashes = new Map(preflight.knownHashes || []);
+        const hashPaths = new Set(preflight.hashPaths || []);
+        const entriesToHash = manifest.filter((entry) => hashPaths.has(entry.relativePath));
+        let hashedCount = 0;
+
+        for (const entry of manifest) {
+          if (knownHashes.has(entry.relativePath)) entry.hash = knownHashes.get(entry.relativePath);
+        }
+
+        const hashStartedAt = performance.now();
+        await mapWithConcurrency(entriesToHash, HASH_CONCURRENCY, async (entry) => {
+          const file = fileByPath.get(entry.relativePath);
+          if (!file) throw new Error(`找不到本地文件：${entry.relativePath}`);
+          entry.hash = await hashBuffer(await file.arrayBuffer());
+          hashedCount++;
+          const ratio = entriesToHash.length > 0 ? hashedCount / entriesToHash.length : 1;
+          setProgress(38 + Math.round(ratio * 44), `计算变化资源指纹 ${hashedCount} / ${entriesToHash.length}`);
+        });
+        const hashFinishedAt = performance.now();
+
+        setProgress(88, '生成同步差异');
+        const planStartedAt = performance.now();
+        const result = await request('prepare-sync', { rootName, manifest });
+        const planFinishedAt = performance.now();
+        result.adopted = (result.adopted || 0) + (preflight.adopted || 0);
+        result.conflicts = Array.from(new Set([
+          ...(preflight.conflicts || []),
+          ...(result.conflicts || [])
+        ]));
+        result.scanTimings = {
+          headerMs: headerFinishedAt - scanStartedAt,
+          preflightMs: preflightFinishedAt - preflightStartedAt,
+          hashMs: hashFinishedAt - hashStartedAt,
+          planMs: planFinishedAt - planStartedAt,
+          totalMs: planFinishedAt - scanStartedAt,
+          scanIndexReused: result.scanIndexReused === true
+        };
+        setProgress(100, '差异分析完成');
+        renderPlan(result);
+
+        const notes = [];
+        if (duplicateNameCount > 0) notes.push(`同名覆盖 ${duplicateNameCount} 个旧文件`);
+        if (invalidCount > 0) notes.push(`跳过 ${invalidCount} 个无效 PNG`);
+        const suffix = notes.length > 0 ? `，${notes.join('，')}` : '';
+        const seconds = ((performance.now() - scanStartedAt) / 1000).toFixed(1);
+        setStatus(
+          `扫描完成：${manifest.length} 个资源，仅校验 ${entriesToHash.length} 个内容，用时 ${seconds}s${suffix}`,
+          invalidCount ? 'error' : 'success'
+        );
+      } catch (error) {
+        setStatus(error.message || String(error), 'error');
+        resetPlan();
+      } finally {
+        setBusy(false);
+        setTimeout(() => {
+          if (!isBusy) showProgress(false);
+        }, 450);
+      }
+    }
+
+    function renderPlan(plan) {
+      currentPlan = plan;
+      syncComplete = false;
+      selectedFolders = new Set(plan.folders.map((folder) => folder.folderPath));
+      document.getElementById('rootName').textContent = plan.rootName;
+      document.getElementById('adoptedCount').textContent = plan.adopted > 0
+        ? `接管 ${plan.adopted}`
+        : '';
+
+      folderList.replaceChildren();
+      for (const folder of plan.folders) {
+        folderList.appendChild(createFolderRow(folder));
+      }
+
+      if (plan.conflicts && plan.conflicts.length > 0) {
+        conflictNote.style.display = 'block';
+        conflictNote.textContent = `${plan.conflicts.length} 个旧资源无法唯一匹配，将保持不动。`;
+      } else {
+        conflictNote.style.display = 'none';
+        conflictNote.textContent = '';
+      }
+
+      planElement.style.display = 'block';
+      updateSelectedSummary();
+    }
+
+    function createFolderRow(folder) {
+      const label = document.createElement('label');
+      label.className = 'folder-row';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = true;
+      checkbox.value = folder.folderPath;
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) selectedFolders.add(folder.folderPath);
+        else selectedFolders.delete(folder.folderPath);
+        updateSelectedSummary();
+      });
+
+      const info = document.createElement('div');
+      info.className = 'folder-info';
+
+      const title = document.createElement('div');
+      title.className = 'folder-title';
+      const path = document.createElement('span');
+      path.className = 'folder-path';
+      path.textContent = folder.folderPath;
+      path.title = folder.folderPath;
+      const badge = document.createElement('span');
+      badge.className = `badge ${folder.status}`;
+      badge.textContent = folderStatusLabel(folder.status);
+      title.append(path, badge);
+
+      const counts = document.createElement('div');
+      counts.className = 'folder-counts';
+      counts.textContent = compactCounts(folder.counts);
+      info.append(title, counts);
+
+      const total = document.createElement('div');
+      total.className = 'folder-total';
+      total.textContent = String(sumCounts(folder.counts));
+
+      label.append(checkbox, info, total);
+      return label;
+    }
+
+    function updateSelectedSummary() {
+      if (!currentPlan) return;
+      const counts = { add: 0, update: 0, delete: 0, move: 0, unchanged: 0, conflict: 0 };
+      const selectedActions = currentPlan.actions.filter((action) => selectedFolders.has(action.folderPath));
+
+      for (const action of selectedActions) {
+        counts[action.type]++;
+      }
+
+      const duplicateDeleteCount = selectedActions.filter(
+        (action) => action.type === 'delete' && action.required
+      ).length;
+      const missingDeleteCount = counts.delete - duplicateDeleteCount;
+
+      counters.add.textContent = counts.add;
+      counters.update.textContent = counts.update;
+      counters.delete.textContent = counts.delete;
+      counters.move.textContent = counts.move;
+      counters.unchanged.textContent = counts.unchanged;
+      document.getElementById('selectedFolderCount').textContent = `${selectedFolders.size} selected`;
+      updateFolderSelectionControl();
+
+      deleteOption.style.display = missingDeleteCount > 0 ? 'flex' : 'none';
+      const deleteCount = duplicateDeleteCount + (deleteMissing.checked ? missingDeleteCount : 0);
+      const actionable = counts.add + counts.update + counts.move + deleteCount;
+
+      syncButton.disabled = syncComplete || isBusy || selectedFolders.size === 0 || actionable === 0;
+      if (isBusy) syncButton.textContent = '正在处理…';
+      else if (syncComplete) syncButton.textContent = '同步完成，请重新扫描';
+      else if (actionable === 0 && counts.unchanged > 0) syncButton.textContent = '已是最新状态';
+      else syncButton.textContent = `开始同步 ${actionable} 项变更`;
+
+      document.getElementById('footerNote').textContent = counts.conflict > 0
+        ? `${counts.conflict} 个冲突项会保持不动`
+        : (duplicateDeleteCount > 0
+          ? `${duplicateDeleteCount} 个同名重复 Component 会自动清理`
+          : '未变化的 Component 不会被重写或移动');
+    }
+
+    function toggleFolderSelection() {
+      if (!currentPlan || isBusy || currentPlan.folders.length === 0) return;
+      const allSelected = currentPlan.folders.every(
+        (folder) => selectedFolders.has(folder.folderPath)
+      );
+      selectedFolders = allSelected
+        ? new Set()
+        : new Set(currentPlan.folders.map((folder) => folder.folderPath));
+
+      for (const checkbox of folderList.querySelectorAll('input[type="checkbox"]')) {
+        checkbox.checked = !allSelected;
+      }
+      updateSelectedSummary();
+    }
+
+    function updateFolderSelectionControl() {
+      const folders = currentPlan ? currentPlan.folders : [];
+      const allSelected = folders.length > 0 && folders.every(
+        (folder) => selectedFolders.has(folder.folderPath)
+      );
+      toggleAllFolders.textContent = allSelected ? '全取消' : '全选';
+      toggleAllFolders.title = allSelected ? '取消选择所有文件夹' : '选择所有文件夹';
+      toggleAllFolders.setAttribute('aria-label', toggleAllFolders.title);
+      toggleAllFolders.disabled = isBusy || folders.length === 0;
+    }
+
+    async function startSync() {
+      if (!currentPlan || isBusy || selectedFolders.size === 0) return;
+      const selectedActions = currentPlan.actions.filter((action) => selectedFolders.has(action.folderPath));
+      const duplicateDeleteCount = selectedActions.filter(
+        (action) => action.type === 'delete' && action.required
+      ).length;
+      const missingDeleteCount = selectedActions.filter(
+        (action) => action.type === 'delete' && !action.required
+      ).length;
+      const enabledMissingDeleteCount = deleteMissing.checked ? missingDeleteCount : 0;
+      const deleteCount = duplicateDeleteCount + enabledMissingDeleteCount;
+
+      if (deleteCount > 0) {
+        const details = [];
+        if (duplicateDeleteCount > 0) details.push(`清理 ${duplicateDeleteCount} 个同名重复 Component`);
+        if (enabledMissingDeleteCount > 0) details.push(`删除 ${enabledMissingDeleteCount} 个本地已不存在的托管资源`);
+        const accepted = window.confirm(`将${details.join('，')}，是否继续？`);
+        if (!accepted) return;
+      }
+
+      setBusy(true);
+      showProgress(true);
+      setProgress(0, '准备同步');
+      const warnings = [];
+      const syncStartedAt = performance.now();
+      let fileReadMs = 0;
+      let applyRequestMs = 0;
+      let pluginApplyMs = 0;
+
+      try {
+        const begin = await request('begin-sync', {
+          selectedFolders: Array.from(selectedFolders),
+          deleteMissing: deleteMissing.checked
+        });
+        const fileActions = begin.fileActions || [];
+        const baseCompleted = begin.stats.moved + begin.stats.skipped;
+        const total = Math.max(1, baseCompleted + fileActions.length + (begin.pendingDeletes || 0));
+        let completed = baseCompleted;
+        setProgress(Math.round((completed / total) * 100), `应用结构变更 ${completed} / ${total}`);
+
+        const availableActions = [];
+        for (const relativePath of fileActions) {
+          const file = fileByPath.get(relativePath);
+          if (!file) {
+            warnings.push(`${relativePath}：找不到本地文件`);
+            completed++;
+            continue;
+          }
+          availableActions.push(relativePath);
+        }
+
+        const batches = buildFileBatches(availableActions);
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+          const batch = batches[batchIndex];
+          const firstPath = batch[0];
+          const lastPath = batch[batch.length - 1];
+          setProgress(
+            Math.round((completed / total) * 100),
+            `读取批次 ${batchIndex + 1} / ${batches.length}（${batch.length} 个资源）`
+          );
+          const readStartedAt = performance.now();
+          const files = await Promise.all(batch.map(async (relativePath) => ({
+            relativePath,
+            bytes: await fileByPath.get(relativePath).arrayBuffer()
+          })));
+          fileReadMs += performance.now() - readStartedAt;
+          setProgress(
+            Math.round((completed / total) * 100),
+            `导入批次 ${batchIndex + 1} / ${batches.length}：${firstPath}`
+          );
+          let batchResult;
+          try {
+            const applyStartedAt = performance.now();
+            batchResult = await request(
+              'apply-batch',
+              { files },
+              APPLY_BATCH_TIMEOUT_MS
+            );
+            applyRequestMs += performance.now() - applyStartedAt;
+            pluginApplyMs += Number(batchResult.timingMs) || 0;
+          } catch (error) {
+            throw new Error(`${firstPath} ～ ${lastPath}：${error.message || String(error)}`);
+          }
+          for (const result of batchResult.results || []) {
+            if (result.status === 'skipped' && result.reason) {
+              warnings.push(`${result.relativePath}：${result.reason}`);
+            }
+          }
+          completed += batch.length;
+          setProgress(
+            Math.round((completed / total) * 100),
+            `同步资源 ${completed} / ${total}`
+          );
+        }
+
+        const finish = await request('finish-sync', {});
+        warnings.push(...(finish.warnings || []));
+        setProgress(100, '同步完成');
+
+        const stats = finish.stats;
+        const totalMs = performance.now() - syncStartedAt;
+        const pluginTimings = finish.timings || {};
+        const summary = `新增 ${stats.added} · 更新 ${stats.updated} · 删除 ${stats.deleted} · 移动 ${stats.moved}`;
+        const statusSummary = `${summary} · 用时 ${formatDuration(totalMs)}`;
+        setStatus(
+          warnings.length > 0 ? `${statusSummary}，${warnings.length} 项提示` : statusSummary,
+          warnings.length ? 'error' : 'success'
+        );
+        syncComplete = true;
+        document.getElementById('footerNote').textContent = warnings.length > 0
+          ? warnings[0]
+          : [
+              `未变化 ${stats.unchanged} 项，全部保持原位`,
+              `读取 ${formatDuration(fileReadMs)}`,
+              `导入 ${formatDuration(pluginApplyMs || applyRequestMs)}`,
+              `排版 ${formatDuration(Number(pluginTimings.layoutMs) || 0)}`,
+              Number(pluginTimings.imagesReused) > 0
+                ? `复用图片 ${pluginTimings.imagesReused} 张`
+                : ''
+            ].filter(Boolean).join(' · ');
+      } catch (error) {
+        setStatus(`同步失败：${error.message || String(error)}`, 'error');
+      } finally {
+        setBusy(false);
+        setTimeout(() => showProgress(false), 700);
+      }
+    }
+
+    function splitRelativePath(file) {
+      return String(file.webkitRelativePath || file.name)
+        .replace(/\\/g, '/')
+        .split('/')
+        .filter(Boolean);
+    }
+
+    function dedupeNewestResources(entries) {
+      const newestByName = new Map();
+      for (const entry of entries) {
+        const key = `${entry.folderPath}\u0000${entry.name}`;
+        const previous = newestByName.get(key);
+        const isNewer = !previous ||
+          entry.lastModified > previous.lastModified ||
+          (entry.lastModified === previous.lastModified &&
+            entry.relativePath.localeCompare(previous.relativePath) >= 0);
+        if (isNewer) newestByName.set(key, entry);
+      }
+      return Array.from(newestByName.values())
+        .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+    }
+
+    function buildFileBatches(relativePaths) {
+      const batches = [];
+      let current = [];
+      let currentBytes = 0;
+
+      for (const relativePath of relativePaths) {
+        const file = fileByPath.get(relativePath);
+        const fileBytes = file ? file.size : 0;
+        const projectedCount = current.length + 1;
+        const projectedBytes = currentBytes + fileBytes;
+        const averageBytes = projectedBytes / projectedCount;
+        const adaptiveFileLimit = averageBytes <= APPLY_BATCH_SMALL_FILE_BYTES
+          ? APPLY_BATCH_MAX_FILES
+          : (averageBytes <= APPLY_BATCH_MEDIUM_FILE_BYTES ? 32 : 16);
+        const exceedsLimit = current.length > 0 && (
+          current.length >= adaptiveFileLimit ||
+          projectedBytes > APPLY_BATCH_MAX_BYTES
+        );
+        if (exceedsLimit) {
+          batches.push(current);
+          current = [];
+          currentBytes = 0;
+        }
+        current.push(relativePath);
+        currentBytes += fileBytes;
+      }
+      if (current.length > 0) batches.push(current);
+      return batches;
+    }
+
+    function readPngDimensions(buffer) {
+      const bytes = new Uint8Array(buffer);
+      const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+      if (bytes.length < 24 || !signature.every((value, index) => bytes[index] === value)) {
+        throw new Error('不是有效的 PNG 文件');
+      }
+      const view = new DataView(buffer);
+      const width = view.getUint32(16, false);
+      const height = view.getUint32(20, false);
+      if (!width || !height) throw new Error('PNG 尺寸无效');
+      return { width, height };
+    }
+
+    function formatDuration(milliseconds) {
+      const value = Number(milliseconds) || 0;
+      return value < 1000 ? `${Math.round(value)}ms` : `${(value / 1000).toFixed(1)}s`;
+    }
+
+    async function hashBuffer(buffer) {
+      if (window.crypto && window.crypto.subtle) {
+        try {
+          const digest = await window.crypto.subtle.digest('SHA-256', buffer);
+          return 'sha256:' + Array.from(new Uint8Array(digest))
+            .map((byte) => byte.toString(16).padStart(2, '0'))
+            .join('');
+        } catch (_) {
+          // Fall through to the deterministic local hash below.
+        }
+      }
+
+      // Deterministic fallback for hosts without SubtleCrypto.
+      let hash = 2166136261;
+      for (const byte of new Uint8Array(buffer)) {
+        hash ^= byte;
+        hash = Math.imul(hash, 16777619);
+      }
+      return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+    }
+
+    async function mapWithConcurrency(items, limit, worker) {
+      if (items.length === 0) return;
+      let nextIndex = 0;
+      const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (true) {
+          const index = nextIndex++;
+          if (index >= items.length) return;
+          await worker(items[index], index);
+        }
+      });
+      await Promise.all(workers);
+    }
+
+    function folderStatusLabel(status) {
+      if (status === 'new') return 'NEW';
+      if (status === 'removed') return 'MISSING';
+      return 'SYNCED';
+    }
+
+    function compactCounts(counts) {
+      const parts = [];
+      if (counts.add) parts.push(`+${counts.add}`);
+      if (counts.update) parts.push(`~${counts.update}`);
+      if (counts.delete) parts.push(`-${counts.delete}`);
+      if (counts.move) parts.push(`>${counts.move}`);
+      if (counts.unchanged) parts.push(`=${counts.unchanged}`);
+      if (counts.conflict) parts.push(`!${counts.conflict}`);
+      return parts.join('  ') || '无资源';
+    }
+
+    function sumCounts(counts) {
+      return Object.values(counts).reduce((sum, value) => sum + value, 0);
+    }
+
+    function setBusy(value) {
+      isBusy = value;
+      pickButton.disabled = value;
+      if (currentPlan) updateSelectedSummary();
+      else syncButton.disabled = true;
+    }
+
+    function setStatus(message, tone) {
+      statusLine.textContent = message;
+      statusLine.className = `status-line${tone ? ` ${tone}` : ''}`;
+    }
+
+    function showProgress(visible) {
+      scanProgress.style.display = visible ? 'block' : 'none';
+    }
+
+    function setProgress(percent, label) {
+      const value = Math.max(0, Math.min(100, percent));
+      progressBar.value = value;
+      progressLabel.textContent = label;
+      progressPercent.textContent = `${value}%`;
+    }
+
+    function showFileStage(message) {
+      const relativePath = message.relativePath;
+      const stage = message.stage;
+      const stageLabels = {
+        structure: '合并到一级 Section',
+        batch: '插件批量创建 Component',
+        'batch-done': '批次创建完成',
+        received: '插件已接收',
+        image: '创建 Figma 图片',
+        layout: '创建 Component',
+        'final-layout': '整理 Component Set 和 Section',
+        done: '资源处理完成',
+        failed: '资源处理失败'
+      };
+      const label = stageLabels[stage] || '处理资源';
+      progressLabel.textContent = relativePath ? `${label}：${relativePath}` : label;
+    }
+
+    function resetPlan() {
+      currentPlan = null;
+      syncComplete = false;
+      selectedFolders = new Set();
+      planElement.style.display = 'none';
+      folderList.replaceChildren();
+      updateFolderSelectionControl();
+      syncButton.disabled = true;
+      syncButton.textContent = '等待扫描';
+      document.getElementById('footerNote').textContent = '未变化的 Component 不会被重写或移动';
+    }
   </script>
 </body>
 </html>
