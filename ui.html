@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      color: #333;
+      background: #fff;
+      padding: 16px;
+      width: 320px;
+    }
+    h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+    button {
+      width: 100%;
+      padding: 9px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    #pickBtn { background: #18a0fb; color: #fff; margin-bottom: 10px; }
+    #pickBtn:disabled { background: #aaa; cursor: not-allowed; }
+    #importBtn { background: #1bc47d; color: #fff; display: none; margin-top: 10px; }
+    #importBtn:disabled { background: #aaa; cursor: not-allowed; }
+    #status { font-size: 12px; color: #666; min-height: 18px; margin-bottom: 8px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+
+    /* 子文件夹选择区 */
+    #folderList {
+      display: none;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      overflow: hidden;
+      margin-bottom: 4px;
+    }
+    #folderList-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px;
+      background: #f5f5f5;
+      border-bottom: 1px solid #e0e0e0;
+      font-size: 11px;
+      color: #666;
+    }
+    #folderList-header a {
+      color: #18a0fb;
+      cursor: pointer;
+      text-decoration: none;
+      font-size: 11px;
+    }
+    #folderItems {
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .folder-item {
+      display: flex;
+      align-items: center;
+      padding: 5px 10px;
+      border-bottom: 1px solid #f0f0f0;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .folder-item:last-child { border-bottom: none; }
+    .folder-item:hover { background: #f8f8f8; }
+    .folder-item input[type=checkbox] { cursor: pointer; flex-shrink: 0; }
+    .folder-name { font-weight: 600; flex: 1; }
+    .folder-count { color: #aaa; font-size: 11px; flex-shrink: 0; }
+
+    /* 进度 */
+    #progress { display: none; margin-top: 10px; }
+    progress { width: 100%; height: 6px; border-radius: 3px; appearance: none; }
+    progress::-webkit-progress-bar { background: #eee; border-radius: 3px; }
+    progress::-webkit-progress-value { background: #18a0fb; border-radius: 3px; }
+    .progress-label { font-size: 11px; color: #888; margin-top: 4px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h2>图片文件夹导入 Figma</h2>
+  <input type="file" id="folderInput" webkitdirectory multiple accept=".png" style="display:none" />
+  <button id="pickBtn">选择文件夹</button>
+  <div id="status">请选择包含图片的文件夹（支持 PNG）</div>
+
+  <!-- 子文件夹勾选列表 -->
+  <div id="folderList">
+    <div id="folderList-header">
+      <span>选择要导入的子文件夹</span>
+      <span><a id="selectAll">全选</a> / <a id="selectNone">全不选</a></span>
+    </div>
+    <div id="folderItems"></div>
+  </div>
+
+  <button id="importBtn">开始导入</button>
+
+  <div id="progress">
+    <progress id="progressBar" value="0" max="100"></progress>
+    <div class="progress-label" id="progressLabel"></div>
+  </div>
+
+  <script>
+    // allImages: 扫描到的全部图片 { name, section, file }
+    // sectionStats: { sectionName: count }
+    let allImages = [];
+    let sectionStats = {};
+    let isImporting = false;
+
+    const folderInput  = document.getElementById('folderInput');
+    const pickBtn      = document.getElementById('pickBtn');
+    const importBtn    = document.getElementById('importBtn');
+    const statusEl     = document.getElementById('status');
+    const folderListEl = document.getElementById('folderList');
+    const folderItemsEl= document.getElementById('folderItems');
+    const progressEl   = document.getElementById('progress');
+    const progressBar  = document.getElementById('progressBar');
+    const progressLabel= document.getElementById('progressLabel');
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    // ── 选择文件夹 ──────────────────────────────────────────────
+    pickBtn.addEventListener('click', () => { if (!isImporting) folderInput.click(); });
+
+    folderInput.addEventListener('change', () => {
+      const files = Array.from(folderInput.files);
+      allImages = [];
+      sectionStats = {};
+      folderListEl.style.display = 'none';
+      importBtn.style.display = 'none';
+
+      for (const file of files) {
+        if (!file.name.toLowerCase().endsWith('.png')) continue;
+        const parts = file.webkitRelativePath.split('/');
+        // parts[0]=根目录, parts[1]=二级文件夹（section）
+        const section = parts.length >= 3 ? parts[1] : '_root';
+        allImages.push({ name: file.name.replace(/\.[^.]+$/, ''), section, file });
+        sectionStats[section] = (sectionStats[section] || 0) + 1;
+      }
+
+      if (allImages.length === 0) {
+        setStatus('未找到 PNG 图片，请重新选择文件夹。');
+        return;
+      }
+
+      // 渲染子文件夹勾选列表
+      const sections = Object.keys(sectionStats).sort();
+      folderItemsEl.innerHTML = sections.map(s => `
+        <label class="folder-item">
+          <input type="checkbox" class="section-cb" value="${s}" checked />
+          <span class="folder-name">${s}</span>
+          <span class="folder-count">${sectionStats[s]} 张</span>
+        </label>
+      `).join('');
+
+      folderListEl.style.display = 'block';
+      importBtn.style.display = 'block';
+      setStatus(`共找到 ${allImages.length} 张图片，请勾选要导入的子文件夹：`);
+    });
+
+    // 全选 / 全不选
+    document.getElementById('selectAll').addEventListener('click', () =>
+      document.querySelectorAll('.section-cb').forEach(cb => cb.checked = true));
+    document.getElementById('selectNone').addEventListener('click', () =>
+      document.querySelectorAll('.section-cb').forEach(cb => cb.checked = false));
+
+    // ── 开始导入 ────────────────────────────────────────────────
+    importBtn.addEventListener('click', async () => {
+      if (isImporting) return;
+
+      const selected = new Set(
+        Array.from(document.querySelectorAll('.section-cb:checked')).map(cb => cb.value)
+      );
+      if (selected.size === 0) { setStatus('请至少选择一个子文件夹。'); return; }
+
+      const images = allImages.filter(img => selected.has(img.section));
+      if (images.length === 0) { setStatus('所选文件夹中没有图片。'); return; }
+
+      isImporting = true;
+      pickBtn.disabled = true;
+      importBtn.disabled = true;
+      progressEl.style.display = 'block';
+      progressBar.value = 0;
+
+      // 按 section 分组排序，同 section 的连续发送
+      images.sort((a, b) => a.section < b.section ? -1 : a.section > b.section ? 1 : 0);
+
+      const total = images.length;
+      let processed = 0;
+      let aborted = false;
+
+      // 逐张发送，附带是否为该 section 最后一张的标记
+      for (let i = 0; i < images.length; i++) {
+        if (aborted) break;
+
+        const img = images[i];
+        const isLast = i === images.length - 1;
+        const nextSection = (i + 1 < images.length) ? images[i + 1].section : null;
+        const isSectionLast = nextSection !== img.section; // 该 section 的最后一张
+
+        const buf = await img.file.arrayBuffer();
+
+        parent.postMessage({
+          pluginMessage: {
+            type: 'import-one',
+            name: img.name,
+            section: img.section,
+            isLast,
+            isSectionLast,
+            bytes: buf
+          }
+        }, '*');
+
+        processed++;
+        progressBar.value = Math.round((processed / total) * 100);
+        progressLabel.textContent = `处理中 ${processed} / ${total}`;
+
+        // 等 code.js 回 ack 或 error
+        const result = await waitForAck();
+        if (result === 'error') { aborted = true; break; }
+      }
+    });
+
+    function waitForAck() {
+      return new Promise(resolve => {
+        const h = e => {
+          const type = e.data?.pluginMessage?.type;
+          if (type === 'batch-ack' || type === 'done') {
+            window.removeEventListener('message', h);
+            resolve('ok');
+          } else if (type === 'error') {
+            window.removeEventListener('message', h);
+            resolve('error');
+          }
+        };
+        window.addEventListener('message', h);
+      });
+    }
+
+    // ── 来自 code.js 的消息 ─────────────────────────────────────
+    window.addEventListener('message', e => {
+      const msg = e.data?.pluginMessage;
+      if (!msg) return;
+      if (msg.type === 'done') {
+        progressBar.value = 100;
+        progressLabel.textContent = '导入完成！';
+        setStatus(`成功导入 ${msg.total} 个 Component，共 ${msg.sections} 个 Section。`);
+        isImporting = false;
+        pickBtn.disabled = false;
+        importBtn.disabled = false;
+      } else if (msg.type === 'error') {
+        setStatus('导入出错：' + msg.message);
+        isImporting = false;
+        pickBtn.disabled = false;
+        importBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
