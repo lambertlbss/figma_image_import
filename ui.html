@@ -576,9 +576,8 @@
           <div class="classification-topline">
             <span class="classification-title">组件集分类</span>
             <select id="classificationMode" aria-label="组件集分类方式">
-              <option value="strict">严格尺寸</option>
-              <option value="smart" selected>智能规则</option>
-              <option value="ai">AI 辅助（MCP）</option>
+              <option value="strict" selected>严格尺寸</option>
+              <option value="ai">AI 辅助（基于严格尺寸）</option>
             </select>
           </div>
           <div id="classificationSummary" class="classification-summary">扫描后显示分类结果。</div>
@@ -868,8 +867,7 @@
     function renderClassificationSummary(summary) {
       const modeLabels = {
         strict: '严格尺寸',
-        smart: '智能规则',
-        ai: 'AI 辅助'
+        ai: 'AI 辅助（基于严格尺寸）'
       };
       const mode = summary.mode || classificationMode.value;
       classificationMode.value = mode;

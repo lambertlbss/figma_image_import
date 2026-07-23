@@ -253,8 +253,9 @@ function publishClassificationRequest(payload) {
       nodeId: component && !component.removed ? component.id : null
     };
   });
-  const smart = classifyManifest(requestManifest, 'smart', null);
-  const smartGroups = summarizeClassificationGroups(smart.manifest);
+  const strict = classifyManifest(requestManifest, 'strict', null);
+  const strictGroups = summarizeClassificationGroups(strict.manifest)
+    .filter((group) => group.members.length >= 2);
   const request = {
     schemaVersion: CLASSIFICATION_SCHEMA_VERSION,
     requestId,
@@ -265,7 +266,7 @@ function publishClassificationRequest(payload) {
     libraryId: activeSync.libraryId,
     selectedFolders: Array.from(selectedFolders),
     assets,
-    smartGroups,
+    strictGroups,
     responseContract: {
       schemaVersion: CLASSIFICATION_SCHEMA_VERSION,
       requestId,
@@ -299,7 +300,7 @@ function publishClassificationRequest(payload) {
     assetCount: assets.length,
     folderCount: selectedFolders.size,
     selectedFolders: Array.from(selectedFolders),
-    smartGroupCount: smartGroups.length,
+    strictGroupCount: strictGroups.length,
     namespace: SHARED_DATA_NAMESPACE,
     requestKey: CLASSIFICATION_REQUEST_KEY,
     planKey: CLASSIFICATION_PLAN_KEY,
@@ -409,7 +410,8 @@ function buildClassificationPrompt(request) {
     `页面节点：${request.pageId}`,
     `读取 shared plugin data 索引：namespace="${SHARED_DATA_NAMESPACE}", key="${CLASSIFICATION_REQUEST_KEY}"。`,
     '该索引是 encoding="chunked-json" 的 JSON；按 chunkKeys 顺序读取所有分片，拼接字符串后 JSON.parse 得到请求。',
-    '结合资源名称、尺寸、现有节点截图和智能规则候选组，输出保守的组件集方案。',
+    '以严格尺寸候选组为基础，结合资源路径、名称、尺寸和现有节点截图，只调整确有必要的组件集。',
+    '未写入 groups 或 standalone 的资源继续保持严格尺寸分类；不要跨一级文件夹合并资源。',
     `将结果按 request.responseContract 写回同一页面：namespace="${SHARED_DATA_NAMESPACE}", index key="${CLASSIFICATION_PLAN_KEY}"。`,
     `先 JSON.stringify 方案，按最多 ${SHARED_DATA_CHUNK_CHAR_LIMIT} 个字符拆分并依次写入 ${CLASSIFICATION_PLAN_KEY}_0、${CLASSIFICATION_PLAN_KEY}_1…；最后再写索引 key。`,
     '索引格式：{"encoding":"chunked-json","chunkCount":N,"chunkKeys":[...],"schemaVersion":1,"requestId":"..."}。',
@@ -772,7 +774,7 @@ function sanitizeManifest(items) {
 }
 
 function normalizeClassificationMode(value) {
-  return value === 'smart' || value === 'ai' ? value : 'strict';
+  return value === 'ai' ? 'ai' : 'strict';
 }
 
 function classifyManifest(baseManifest, mode, aiPlan) {
@@ -787,12 +789,19 @@ function classifyManifest(baseManifest, mode, aiPlan) {
     classificationConfidence: 0
   }));
 
-  if (normalizedMode === 'strict') assignStrictClassifications(manifest);
-  else assignSmartClassifications(manifest);
+  assignStrictClassifications(manifest);
   if (normalizedMode === 'ai' && aiPlan) applyAiClassificationPlan(manifest, aiPlan);
   assignClassificationLayoutOrder(manifest);
 
-  const grouped = manifest.filter((entry) => entry.componentSetKey);
+  const groupSizes = new Map();
+  for (const entry of manifest) {
+    if (!entry.componentSetKey) continue;
+    const id = groupKey(entry.folderPath, entry.componentSetKey);
+    groupSizes.set(id, (groupSizes.get(id) || 0) + 1);
+  }
+  const grouped = manifest.filter((entry) => entry.componentSetKey &&
+    groupSizes.get(groupKey(entry.folderPath, entry.componentSetKey)) >= 2
+  );
   const groupIds = new Set(grouped.map((entry) => groupKey(entry.folderPath, entry.componentSetKey)));
   return {
     manifest,
@@ -820,132 +829,6 @@ function assignStrictClassifications(manifest) {
       confidence: 1
     });
   }
-}
-
-function assignSmartClassifications(manifest) {
-  const candidates = new Map();
-  for (const entry of manifest) {
-    const descriptor = inferVariantDescriptor(entry.name);
-    if (!descriptor) continue;
-    const key = `${entry.folderPath}\u0000${descriptor.family}\u0000${descriptor.kind}`;
-    if (!candidates.has(key)) candidates.set(key, []);
-    candidates.get(key).push({ entry, descriptor });
-  }
-
-  for (const items of candidates.values()) {
-    if (items.length < 2) continue;
-    const clusters = clusterClassificationCandidates(items);
-    for (const cluster of clusters) {
-      if (cluster.length < 2) continue;
-      const descriptor = cluster[0].descriptor;
-      const dimensions = classificationClusterDimensions(cluster);
-      const dimensionKey = descriptor.kind === 'glyph'
-        ? `h${dimensions.minHeight}-${dimensions.maxHeight}`
-        : `${dimensions.minWidth}-${dimensions.maxWidth}x${dimensions.minHeight}-${dimensions.maxHeight}`;
-      const key = `smart:${descriptor.family}:${dimensionKey}`;
-      const name = descriptor.family.replace(/_/g, '/');
-      for (const item of cluster) {
-        assignEntryClassification(item.entry, {
-          key,
-          name,
-          property: descriptor.property,
-          value: item.descriptor.value,
-          source: 'smart',
-          confidence: descriptor.kind === 'glyph' ? 0.9 : 0.82
-        });
-      }
-    }
-  }
-}
-
-function inferVariantDescriptor(name) {
-  const normalized = String(name || '').trim().toLowerCase().replace(/\s+/g, '_');
-  const tokens = normalized.split('_').filter(Boolean);
-  if (tokens.length < 2) return null;
-  const last = tokens[tokens.length - 1];
-  const glyphWords = new Set([
-    '%', '+', '-', 'dian', 'dot', 'plus', 'minus', 'xing', 'wan', 'yi', 'bao', 'ji', 'shang', 'xia'
-  ]);
-  const stateWords = new Set([
-    'a', 'b', 'c', 'up', 'down', 'left', 'right', 'on', 'off', 'normal', 'active', 'selected',
-    'disabled', 'hover', 'pressed', 'open', 'closed'
-  ]);
-
-  const embeddedState = last.match(/^(\d{1,3})([a-z])$/);
-  if (embeddedState) {
-    return {
-      family: tokens.slice(0, -1).concat(embeddedState[1]).join('_'),
-      value: embeddedState[2],
-      kind: 'state',
-      property: 'State'
-    };
-  }
-  if (/^\d$/.test(last) || glyphWords.has(last)) {
-    return {
-      family: tokens.slice(0, -1).join('_'),
-      value: last,
-      kind: 'glyph',
-      property: 'Glyph'
-    };
-  }
-  if (/^\d{2,3}$/.test(last)) {
-    return {
-      family: tokens.slice(0, -1).join('_'),
-      value: last,
-      kind: 'numbered',
-      property: 'Variant'
-    };
-  }
-  if (stateWords.has(last)) {
-    return {
-      family: tokens.slice(0, -1).join('_'),
-      value: last,
-      kind: 'state',
-      property: 'State'
-    };
-  }
-  return null;
-}
-
-function clusterClassificationCandidates(items) {
-  const sorted = items.slice().sort((a, b) =>
-    (a.entry.height - b.entry.height) || (a.entry.width - b.entry.width) ||
-    a.entry.relativePath.localeCompare(b.entry.relativePath)
-  );
-  const clusters = [];
-  for (const item of sorted) {
-    let selected = null;
-    for (const cluster of clusters) {
-      if (classificationCandidateFits(cluster, item)) {
-        selected = cluster;
-        break;
-      }
-    }
-    if (selected) selected.push(item);
-    else clusters.push([item]);
-  }
-  return clusters;
-}
-
-function classificationCandidateFits(cluster, candidate) {
-  const next = cluster.concat(candidate);
-  const dimensions = classificationClusterDimensions(next);
-  if (candidate.descriptor.kind === 'glyph') {
-    return dimensions.maxHeight - dimensions.minHeight <= 4;
-  }
-  return dimensions.maxWidth - dimensions.minWidth <= 2 &&
-    dimensions.maxHeight - dimensions.minHeight <= 2;
-}
-
-function classificationClusterDimensions(cluster) {
-  const widths = cluster.map((item) => item.entry.width);
-  const heights = cluster.map((item) => item.entry.height);
-  return {
-    minWidth: Math.min(...widths),
-    maxWidth: Math.max(...widths),
-    minHeight: Math.min(...heights),
-    maxHeight: Math.max(...heights)
-  };
 }
 
 function applyAiClassificationPlan(manifest, plan) {

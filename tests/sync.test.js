@@ -946,39 +946,6 @@ test('large component sets allocate unique slots within a bounded time', async (
   assert.ok(rescanElapsedMs < 2500, `large layout audit took ${rescanElapsedMs}ms`);
 });
 
-test('large smart-classified standalone imports avoid per-item placement searches', async () => {
-  const runtime = createRuntime();
-  const manifest = Array.from({ length: 3800 }, (_, index) => {
-    const name = `resource-${String(index).padStart(4, '0')}`;
-    return asset(`icons/${name}.png`, 'icons', name, `h-${index}`, 24, 24);
-  });
-
-  const startedAt = Date.now();
-  const prepared = await runtime.send('prepare-sync', {
-    rootName: 'library',
-    manifest,
-    classificationMode: 'smart'
-  });
-  assert.equal(prepared.classification.standaloneAssets, manifest.length);
-  await runtime.send('begin-sync', { selectedFolders: ['icons'], deleteMissing: true });
-  for (let index = 0; index < manifest.length; index += 48) {
-    await runtime.send('apply-batch', {
-      files: manifest.slice(index, index + 48).map((entry) => ({
-        relativePath: entry.relativePath,
-        bytes: new Uint8Array([1, 2, 3]).buffer
-      }))
-    });
-  }
-  await runtime.send('finish-sync', {});
-  const elapsedMs = Date.now() - startedAt;
-  const section = runtime.section('icons');
-  const positions = section.children.map((node) => `${node.x},${node.y}`);
-
-  assert.equal(section.children.length, manifest.length);
-  assert.equal(new Set(positions).size, manifest.length);
-  assert.ok(elapsedMs < 2500, `large standalone import took ${elapsedMs}ms`);
-});
-
 test('invalid image bytes are skipped and the sync still finishes', async () => {
   const runtime = createRuntime();
   const manifest = [asset('icons/broken.png', 'icons', 'broken', 'h-broken', 24, 24)];
@@ -1017,43 +984,8 @@ test('deletions are cancelled when another file fails during the same sync', asy
   assert.ok(finish.warnings.some((warning) => warning.includes('取消')));
 });
 
-test('smart classification groups semantic glyph families with mixed widths and leaves unrelated same-size assets standalone', async () => {
-  const runtime = createRuntime();
-  const manifest = [
-    asset('common/zhandouli_1_0.png', 'common', 'zhandouli_1_0', 'h-0', 20, 25),
-    asset('common/zhandouli_1_1.png', 'common', 'zhandouli_1_1', 'h-1', 13, 25),
-    asset('common/zhandouli_1_2.png', 'common', 'zhandouli_1_2', 'h-2', 21, 25),
-    asset('common/common_box_alpha.png', 'common', 'common_box_alpha', 'h-box', 40, 40),
-    asset('common/common_icon_beta.png', 'common', 'common_icon_beta', 'h-icon', 40, 40)
-  ];
-
-  const prepared = await runtime.send('prepare-sync', {
-    rootName: 'library',
-    manifest,
-    classificationMode: 'smart'
-  });
-  assert.deepEqual(JSON.parse(JSON.stringify(prepared.classification)), {
-    mode: 'smart',
-    groups: 1,
-    groupedAssets: 3,
-    standaloneAssets: 2,
-    aiGroups: 0
-  });
-
-  await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
-  for (const entry of manifest) await runtime.apply(entry.relativePath, entry.width, entry.height);
-  await runtime.send('finish-sync', {});
-
-  const section = runtime.section('common');
-  const sets = section.children.filter((node) => node.type === 'COMPONENT_SET');
-  assert.equal(sets.length, 1);
-  assert.equal(sets[0].name, 'zhandouli/1');
-  assert.deepEqual(sets[0].children.map((node) => node.name).sort(), ['Glyph=0', 'Glyph=1', 'Glyph=2']);
-  assert.equal(section.children.filter((node) => node.type === 'COMPONENT').length, 2);
-});
-
-test('strict, smart, and AI modes defer standalone placement and converge to the same final layout', async () => {
-  const modes = ['strict', 'smart', 'ai'];
+test('strict and AI modes defer standalone placement and converge to the same baseline layout', async () => {
+  const modes = ['strict', 'ai'];
   const finalLayouts = [];
 
   for (const mode of modes) {
@@ -1067,8 +999,8 @@ test('strict, smart, and AI modes defer standalone placement and converge to the
       manifest,
       classificationMode: mode
     });
-    if (mode === 'strict') assert.equal(prepared.classification.groups, manifest.length);
-    else assert.equal(prepared.classification.standaloneAssets, manifest.length);
+    assert.equal(prepared.classification.groups, 0);
+    assert.equal(prepared.classification.standaloneAssets, manifest.length);
 
     await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
     await runtime.send('apply-batch', {
@@ -1098,39 +1030,6 @@ test('strict, smart, and AI modes defer standalone placement and converge to the
   }
 
   assert.deepEqual(finalLayouts[1], finalLayouts[0]);
-  assert.deepEqual(finalLayouts[2], finalLayouts[0]);
-});
-
-test('switching an existing strict-size library to smart classification preserves component ids while regrouping', async () => {
-  const runtime = createRuntime();
-  const manifest = [
-    asset('common/zhandouli_1_0.png', 'common', 'zhandouli_1_0', 'h-0', 20, 25),
-    asset('common/zhandouli_1_1.png', 'common', 'zhandouli_1_1', 'h-1', 13, 25),
-    asset('common/zhandouli_1_2.png', 'common', 'zhandouli_1_2', 'h-2', 21, 25),
-    asset('common/common_box_alpha.png', 'common', 'common_box_alpha', 'h-box', 40, 40),
-    asset('common/common_icon_beta.png', 'common', 'common_icon_beta', 'h-icon', 40, 40)
-  ];
-  await importAll(runtime, manifest);
-  const idsBefore = new Map(runtime.componentSnapshot().map((item) => [item.path, item.id]));
-
-  const prepared = await runtime.send('prepare-sync', {
-    rootName: 'library',
-    manifest,
-    classificationMode: 'smart'
-  });
-  assert.equal(prepared.summary.move, 5);
-  const begin = await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
-  assert.equal(begin.fileActions.length, 0);
-  await runtime.send('finish-sync', {});
-
-  for (const item of runtime.componentSnapshot()) {
-    assert.equal(item.id, idsBefore.get(item.path));
-  }
-  const section = runtime.section('common');
-  const sets = section.children.filter((node) => node.type === 'COMPONENT_SET');
-  assert.equal(sets.length, 1);
-  assert.equal(sets[0].name, 'zhandouli/1');
-  assert.equal(section.children.filter((node) => node.type === 'COMPONENT').length, 2);
 });
 
 test('MCP classification request round-trips through shared plugin data and applies an approved AI plan', async () => {
@@ -1151,6 +1050,7 @@ test('MCP classification request round-trips through shared plugin data and appl
   const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
   assert.equal(request.requestId, published.requestId);
   assert.equal(request.assets.length, 2);
+  assert.equal(request.strictGroups.length, 0);
 
   writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
       schemaVersion: 1,
@@ -1253,8 +1153,11 @@ test('large MCP classification requests stay below the shared plugin data entry 
   const published = await runtime.send('publish-classification-request', { selectedFolders: ['common'] });
 
   assert.ok(published.requestChunks > 1);
+  assert.equal(published.strictGroupCount, 1);
   const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
   assert.equal(request.assets.length, manifest.length);
+  assert.equal(request.strictGroups.length, 1);
+  assert.equal(request.strictGroups[0].members.length, manifest.length);
   for (const value of runtime.figma.currentPage._sharedPluginData.values()) {
     assert.ok(Buffer.byteLength(value, 'utf8') <= 100000);
   }
@@ -1264,7 +1167,7 @@ test('MCP classification requests include only selected folders and reject out-o
   const runtime = createRuntime();
   const manifest = [
     asset('common/control_0.png', 'common', 'control_0', 'h-c0', 20, 20),
-    asset('common/control_1.png', 'common', 'control_1', 'h-c1', 21, 20),
+    asset('common/control_1.png', 'common', 'control_1', 'h-c1', 20, 20),
     asset('icons/action_0.png', 'icons', 'action_0', 'h-i0', 24, 24),
     asset('icons/action_1.png', 'icons', 'action_1', 'h-i1', 24, 24)
   ];
@@ -1278,7 +1181,9 @@ test('MCP classification requests include only selected folders and reject out-o
   assert.deepEqual(JSON.parse(JSON.stringify(request.selectedFolders)), ['common']);
   assert.equal(request.assets.length, 2);
   assert.ok(request.assets.every((entry) => entry.folderPath === 'common'));
-  assert.ok(request.smartGroups.every((group) => group.folderPath === 'common'));
+  assert.ok(request.strictGroups.every((group) => group.folderPath === 'common'));
+  assert.equal(request.strictGroups.length, 1);
+  assert.equal(request.strictGroups[0].members.length, 2);
 
   runtime.figma.currentPage.setSharedPluginData(
     'figma_image_importer',
