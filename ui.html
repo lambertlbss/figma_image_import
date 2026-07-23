@@ -910,7 +910,10 @@
         aiStatus.textContent = copied
           ? `请求 ${result.requestId} 已写入页面，MCP 提示词已复制。粘贴到 Codex 后，回来点击“读取 AI 方案”。`
           : `请求 ${result.requestId} 已写入页面。请在 MCP 客户端读取当前页面的 classification-request。`;
-        setStatus(`已为 ${result.folderCount} 个文件夹、${result.assetCount} 个资源生成 AI 分类请求。`, 'success');
+        setStatus(
+          `已为 ${result.folderCount} 个文件夹、${result.assetCount} 个资源生成 AI 分类请求，发现 ${result.semanticCandidateCount || 0} 个跨尺寸/语义候选系列。`,
+          'success'
+        );
       } catch (error) {
         setStatus(error.message || String(error), 'error');
       } finally {

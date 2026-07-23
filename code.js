@@ -11,6 +11,26 @@ const CLASSIFICATION_PLAN_KEY = 'classification-plan';
 const CLASSIFICATION_SCHEMA_VERSION = 1;
 const CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.7;
 const SHARED_DATA_CHUNK_CHAR_LIMIT = 20000;
+const SEMANTIC_CANDIDATE_MIN_CONFIDENCE = 0.75;
+
+const SEMANTIC_STATE_TOKENS = new Set([
+  'normal', 'default', 'idle', 'hover', 'over', 'pressed', 'press', 'active',
+  'selected', 'select', 'checked', 'unchecked', 'disabled', 'enabled', 'focus',
+  'focused', 'on', 'off', 'open', 'closed', 'close', 'locked', 'unlocked'
+]);
+const SEMANTIC_DIRECTION_TOKENS = new Set([
+  'left', 'right', 'up', 'down', 'top', 'bottom', 'forward', 'back', 'previous',
+  'next', 'zuo', 'you', 'shang', 'xia'
+]);
+const SEMANTIC_QUALITY_TOKENS = new Set([
+  'white', 'gray', 'grey', 'green', 'blue', 'purple', 'orange', 'red', 'gold',
+  'hong', 'cheng', 'jin', 'lan', 'lv', 'zi', 'zuan', 'common', 'rare', 'epic',
+  'legendary', 'normal', 'excellent'
+]);
+const SEMANTIC_GLYPH_TOKENS = new Set([
+  '+', '-', '%', '.', 'dot', 'point', 'dian', 'bao', 'yi', 'ji', 'wan', 'xing',
+  'k', 'm', 'b'
+]);
 
 const SECTION_GAP = 80;
 const SECTION_PADDING = 192;
@@ -256,17 +276,39 @@ function publishClassificationRequest(payload) {
   const strict = classifyManifest(requestManifest, 'strict', null);
   const strictGroups = summarizeClassificationGroups(strict.manifest)
     .filter((group) => group.members.length >= 2);
+  const semanticCandidates = buildSemanticClassificationCandidates(requestManifest);
+  const fileKey = figma.fileKey || null;
+  const pageId = figma.currentPage.id;
+  const pageName = figma.currentPage.name || null;
+  const pageUrl = buildFigmaPageUrl(fileKey, pageId);
   const request = {
     schemaVersion: CLASSIFICATION_SCHEMA_VERSION,
     requestId,
     createdAt: new Date().toISOString(),
-    fileKey: figma.fileKey || null,
-    pageId: figma.currentPage.id,
+    fileKey,
+    pageId,
+    pageName,
+    pageUrl,
     rootName: activeSync.rootName,
     libraryId: activeSync.libraryId,
     selectedFolders: Array.from(selectedFolders),
     assets,
     strictGroups,
+    semanticCandidates,
+    classificationGuidance: {
+      candidatePrinciple: '严格尺寸只是候选来源和默认兜底，不是最终分类边界。',
+      requiredPasses: [
+        '拆分同尺寸但语义、用途或视觉风格不同的资源',
+        '合并跨尺寸但目录、名称模板和视觉用途一致的系列资源',
+        '全局检查同系列资源是否散落在多个尺寸组或只识别了一部分'
+      ],
+      signalPriority: ['一级文件夹边界', '名称模板与变化槽位', '资源路径', '视觉风格', '尺寸关系'],
+      mergeRequirements: [
+        '必须能说明明确的关系类型，例如状态、方向、品质、字形、动画帧、主题或样式',
+        '相同目录、相同尺寸或通用名称前缀本身不足以支持合并'
+      ],
+      fallback: '证据不足时不写入计划，让资源继续保持严格尺寸分类。'
+    },
     responseContract: {
       schemaVersion: CLASSIFICATION_SCHEMA_VERSION,
       requestId,
@@ -275,7 +317,7 @@ function publishClassificationRequest(payload) {
         name: '组件集名称',
         confidence: 0.95,
         variantProperty: 'Variant',
-        members: [{ relativePath: 'folder/file.png', variantValue: 'value' }]
+        members: ['folder/file.png']
       }],
       standalone: ['folder/file.png'],
       transport: {
@@ -295,18 +337,27 @@ function publishClassificationRequest(payload) {
   activeSync.classificationRequestPaths = new Set(requestManifest.map((entry) => entry.relativePath));
   return {
     requestId,
-    pageId: figma.currentPage.id,
-    fileKey: figma.fileKey || null,
+    fileKey,
+    pageId,
+    pageName,
+    pageUrl,
     assetCount: assets.length,
     folderCount: selectedFolders.size,
     selectedFolders: Array.from(selectedFolders),
     strictGroupCount: strictGroups.length,
+    semanticCandidateCount: semanticCandidates.length,
     namespace: SHARED_DATA_NAMESPACE,
     requestKey: CLASSIFICATION_REQUEST_KEY,
     planKey: CLASSIFICATION_PLAN_KEY,
     requestChunks: transport.chunkCount,
     prompt: buildClassificationPrompt(request)
   };
+}
+
+function buildFigmaPageUrl(fileKey, pageId) {
+  if (!fileKey || !pageId) return null;
+  const normalizedNodeId = String(pageId).replace(/:/g, '-');
+  return `https://www.figma.com/design/${encodeURIComponent(String(fileKey))}/current-page?node-id=${encodeURIComponent(normalizedNodeId)}`;
 }
 
 function loadClassificationPlan() {
@@ -396,7 +447,6 @@ function summarizeClassificationGroups(manifest) {
     });
     groups.get(id).members.push({
       relativePath: entry.relativePath,
-      variantValue: entry.variantValue,
       width: entry.width,
       height: entry.height
     });
@@ -404,13 +454,207 @@ function summarizeClassificationGroups(manifest) {
   return Array.from(groups.values());
 }
 
+function buildSemanticClassificationCandidates(manifest) {
+  const families = new Map();
+
+  for (const entry of manifest) {
+    const series = parseSemanticNameSeries(entry.name);
+    if (!series) continue;
+    const key = `${entry.folderPath}\u0000${series.stablePrefix.toLowerCase()}`;
+    if (!families.has(key)) {
+      families.set(key, {
+        folderPath: entry.folderPath,
+        stablePrefix: series.stablePrefix,
+        members: []
+      });
+    }
+    families.get(key).members.push({
+      entry,
+      variableToken: series.variableToken
+    });
+  }
+
+  const candidates = [];
+  for (const family of families.values()) {
+    if (family.members.length < 2) continue;
+    const variableTokens = Array.from(new Set(
+      family.members.map((member) => member.variableToken)
+    ));
+    if (variableTokens.length < 2) continue;
+
+    const entries = family.members.map((member) => member.entry);
+    const dimensions = summarizeSemanticDimensions(entries);
+    const relation = inferSemanticRelation(
+      family.stablePrefix,
+      variableTokens,
+      dimensions,
+      entries.length
+    );
+    if (!relation || relation.confidence < SEMANTIC_CANDIDATE_MIN_CONFIDENCE) continue;
+
+    candidates.push({
+      id: `semantic-${safeClassificationId(`${family.folderPath}-${family.stablePrefix}`)}`,
+      folderPath: family.folderPath,
+      stablePrefix: family.stablePrefix,
+      relationType: relation.type,
+      suggestedVariantProperty: relation.variantProperty,
+      confidence: relation.confidence,
+      evidence: {
+        variableTokens,
+        sizePattern: dimensions.pattern,
+        sizes: dimensions.sizes,
+        crossesStrictSizes: dimensions.sizes.length > 1
+      },
+      members: entries
+        .map((entry) => entry.relativePath)
+        .sort((a, b) => a.localeCompare(b))
+    });
+  }
+
+  candidates.sort((a, b) =>
+    a.folderPath.localeCompare(b.folderPath) ||
+    a.stablePrefix.localeCompare(b.stablePrefix)
+  );
+  return candidates;
+}
+
+function parseSemanticNameSeries(value) {
+  const name = String(value || '').trim();
+  const match = name.match(/^(.*?)[_\-\s]+([^_\-\s]+)$/);
+  if (!match) return null;
+  const stablePrefix = match[1].replace(/[_\-\s]+$/g, '').trim();
+  const variableToken = match[2].trim();
+  if (!stablePrefix || !variableToken) return null;
+  const stableTokens = stablePrefix.split(/[_\-\s]+/).filter(Boolean);
+  if (stableTokens.length < 2 && stablePrefix.length < 5) return null;
+  return { stablePrefix, variableToken };
+}
+
+function summarizeSemanticDimensions(entries) {
+  const widths = entries.map((entry) => positiveNumber(entry.width));
+  const heights = entries.map((entry) => positiveNumber(entry.height));
+  const sizes = Array.from(new Set(entries.map((entry) => sizeKey(entry.width, entry.height))))
+    .sort((a, b) => a.localeCompare(b));
+  const uniqueWidths = new Set(widths);
+  const uniqueHeights = new Set(heights);
+  const minWidth = Math.min(...widths);
+  const maxWidth = Math.max(...widths);
+  const minHeight = Math.min(...heights);
+  const maxHeight = Math.max(...heights);
+  const sameWidth = uniqueWidths.size === 1;
+  const sameHeight = uniqueHeights.size === 1;
+  const nearWidth = minWidth > 0 && maxWidth / minWidth <= 1.25;
+  const nearHeight = minHeight > 0 && maxHeight / minHeight <= 1.25;
+
+  let pattern = 'mixed-sizes';
+  if (sizes.length === 1) pattern = 'exact-size';
+  else if (sameHeight) pattern = 'same-height-variable-width';
+  else if (sameWidth) pattern = 'same-width-variable-height';
+  else if (nearHeight) pattern = 'near-height-variable-width';
+  else if (nearWidth) pattern = 'near-width-variable-height';
+
+  return {
+    sizes,
+    pattern,
+    compatible: sizes.length === 1 || sameWidth || sameHeight || nearWidth || nearHeight,
+    sameWidth,
+    sameHeight,
+    nearWidth,
+    nearHeight
+  };
+}
+
+function inferSemanticRelation(stablePrefix, rawTokens, dimensions, memberCount) {
+  const tokens = rawTokens.map((token) => String(token || '').toLowerCase());
+  const tokenSet = new Set(tokens);
+  const allIn = (allowed) => tokens.every((token) => allowed.has(token));
+  const scaleTokens = tokens.map(parseScaleToken).filter((value) => value !== null);
+
+  if (allIn(SEMANTIC_STATE_TOKENS) && dimensions.compatible) {
+    return semanticRelation('state-series', '状态', 0.97, dimensions);
+  }
+  if (allIn(SEMANTIC_DIRECTION_TOKENS) && dimensions.compatible) {
+    return semanticRelation('direction-series', '方向', 0.97, dimensions);
+  }
+  if (allIn(SEMANTIC_QUALITY_TOKENS) && dimensions.compatible) {
+    return semanticRelation('quality-series', '品质', 0.95, dimensions);
+  }
+  if (scaleTokens.length === tokens.length && new Set(scaleTokens).size >= 2) {
+    return semanticRelation('scale-series', '倍率', 0.96, dimensions);
+  }
+
+  const numericTokens = tokens
+    .filter((token) => /^\d+$/.test(token))
+    .map((token) => Number(token));
+  const glyphTokenCount = tokens.filter((token) =>
+    /^\d$/.test(token) || SEMANTIC_GLYPH_TOKENS.has(token)
+  ).length;
+  const hasDenseDigits = numericTokens.length >= 5 &&
+    sequenceCoverage(numericTokens) >= 0.6 &&
+    Math.max(...numericTokens) <= 9;
+  if (dimensions.compatible && (hasDenseDigits || (numericTokens.length >= 3 && glyphTokenCount >= 4))) {
+    return semanticRelation('glyph-series', '字形', hasDenseDigits ? 0.99 : 0.94, dimensions);
+  }
+
+  const hasNumericSequence = numericTokens.length >= 3 &&
+    sequenceCoverage(numericTokens) >= 0.6;
+  if (dimensions.compatible && hasNumericSequence) {
+    const padded = tokens.filter((token) => /^\d{2,}$/.test(token)).length >= 2;
+    const prefix = stablePrefix.toLowerCase();
+    const looksAnimated = padded || /(?:frame|anim|animation|sequence|seq|帧)/.test(prefix);
+    return semanticRelation(
+      looksAnimated ? 'frame-series' : 'numbered-series',
+      looksAnimated ? '帧' : '样式',
+      looksAnimated ? 0.94 : 0.88,
+      dimensions
+    );
+  }
+
+  if (dimensions.compatible && memberCount >= 3 && tokenSet.size >= 3) {
+    return semanticRelation('named-series', '样式', 0.78, dimensions);
+  }
+  return null;
+}
+
+function semanticRelation(type, variantProperty, confidence, dimensions) {
+  return {
+    type,
+    variantProperty,
+    confidence: Math.min(0.99, confidence + (dimensions.sizes.length > 1 ? 0.01 : 0))
+  };
+}
+
+function parseScaleToken(token) {
+  const match = String(token || '').toLowerCase().match(/^(?:@?(\d+)x|x(\d+))$/);
+  if (!match) return null;
+  return Number(match[1] || match[2]);
+}
+
+function sequenceCoverage(values) {
+  const unique = Array.from(new Set(values.filter(Number.isFinite))).sort((a, b) => a - b);
+  if (unique.length < 2) return 0;
+  const span = unique[unique.length - 1] - unique[0] + 1;
+  return span > 0 ? unique.length / span : 0;
+}
+
 function buildClassificationPrompt(request) {
   return [
     '请使用 Figma MCP 审核当前页面的图片组件分类。',
+    request.pageUrl ? `当前页面链接：${request.pageUrl}` : '当前页面链接：当前文件无法生成可访问链接，请使用下面的文件和页面标识定位。',
+    `文件标识：${request.fileKey || '不可用'}`,
+    `页面名称：${request.pageName || '未命名页面'}`,
     `页面节点：${request.pageId}`,
     `读取 shared plugin data 索引：namespace="${SHARED_DATA_NAMESPACE}", key="${CLASSIFICATION_REQUEST_KEY}"。`,
     '该索引是 encoding="chunked-json" 的 JSON；按 chunkKeys 顺序读取所有分片，拼接字符串后 JSON.parse 得到请求。',
-    '以严格尺寸候选组为基础，结合资源路径、名称、尺寸和现有节点截图，只调整确有必要的组件集。',
+    '严格尺寸候选组只是默认基线和兜底，不是最终分类边界。',
+    '必须做双向审核：拆分同尺寸但语义不同的资源；合并跨尺寸但名称模板、路径和视觉用途一致的系列资源。',
+    '先全局检查 request.semanticCandidates，再检查 strictGroups；semanticCandidates 只是可解释线索，不是必须照搬的最终分组。',
+    '分析名称中的稳定部分和变化槽位，识别状态、方向、品质、数字/文字字形、动画帧、主题和样式系列。',
+    '尺寸不同不能直接否决合并：字符宽度、状态资源、倍率资源和帧序列可能天然跨尺寸。',
+    '相同目录、相同尺寸或 common/bg/icon 等通用前缀本身不足以支持合并；每个 AI 组都应有明确且可解释的共同用途。',
+    '完成分组后做全局遗漏检查，确认同一系列没有散落在其他尺寸组，也没有只识别一部分成员。',
+    '每个组件集只使用一个 Variant Property；AI 可以调整 variantProperty，但 members 只填写资源路径。',
+    '不要生成或修改每个资源的 Variant 值；插件会固定使用资源名作为 Variant 值。',
     '未写入 groups 或 standalone 的资源继续保持严格尺寸分类；不要跨一级文件夹合并资源。',
     `将结果按 request.responseContract 写回同一页面：namespace="${SHARED_DATA_NAMESPACE}", index key="${CLASSIFICATION_PLAN_KEY}"。`,
     `先 JSON.stringify 方案，按最多 ${SHARED_DATA_CHUNK_CHAR_LIMIT} 个字符拆分并依次写入 ${CLASSIFICATION_PLAN_KEY}_0、${CLASSIFICATION_PLAN_KEY}_1…；最后再写索引 key。`,
@@ -864,19 +1108,13 @@ function applyAiClassificationPlan(manifest, plan) {
     }
     usedGroupKeys.add(groupStorageKey);
     const property = String(rawGroup.variantProperty || DEFAULT_VARIANT_PROPERTY).trim() || DEFAULT_VARIANT_PROPERTY;
-    const variantValues = members.map((member, index) =>
-      sanitizeVariantToken(member.variantValue || entries[index].name, entries[index].name)
-    );
-    if (new Set(variantValues).size !== variantValues.length) {
-      throw new Error(`AI 组“${rawGroup.name || id}”存在重复的 Variant 值。`);
-    }
     for (let index = 0; index < entries.length; index++) {
       const entry = entries[index];
       assignEntryClassification(entry, {
         key: `ai:${id}`,
         name: String(rawGroup.name || id).trim() || id,
         property,
-        value: variantValues[index],
+        value: entry.name,
         source: 'ai',
         confidence
       });
@@ -894,11 +1132,11 @@ function applyAiClassificationPlan(manifest, plan) {
 function normalizeAiPlanMember(value) {
   if (typeof value === 'string') {
     const relativePath = normalizeRelativePath(value);
-    return relativePath ? { relativePath, variantValue: '' } : null;
+    return relativePath ? { relativePath } : null;
   }
   if (!value || typeof value !== 'object') return null;
   const relativePath = normalizeRelativePath(value.relativePath || value.path);
-  return relativePath ? { relativePath, variantValue: String(value.variantValue || value.value || '') } : null;
+  return relativePath ? { relativePath } : null;
 }
 
 function safeClassificationId(value) {
@@ -1032,7 +1270,7 @@ function formatEntryVariantName(componentSet, entry) {
     entry.variantProperty || variantPropertyName(componentSet),
     DEFAULT_VARIANT_PROPERTY
   );
-  const value = sanitizeVariantToken(entry.variantValue || entry.name, 'Resource');
+  const value = sanitizeVariantToken(entry.name, 'Resource');
   return `${property}=${value}`;
 }
 
@@ -1048,33 +1286,28 @@ function setManagedComponentName(component, entryOrName) {
 function normalizeComponentSetVariantNames(componentSet) {
   if (!componentSet || componentSet.removed || componentSet.type !== 'COMPONENT_SET') return 0;
   const setMeta = readMeta(componentSet) || {};
-  const property = sanitizeVariantToken(
-    setMeta.variantProperty || variantPropertyName(componentSet),
-    DEFAULT_VARIANT_PROPERTY
-  );
+  const property = resolveComponentSetVariantProperty(componentSet, setMeta);
   let repaired = 0;
 
   for (const component of componentSet.children) {
     if (component.type !== 'COMPONENT') continue;
     const meta = readMeta(component) || {};
-    const resourceName = componentResourceName(component, meta, meta.relativePath || '');
-    const variantValue = meta.variantValue || resourceName;
-    const nextName = `${property}=${sanitizeVariantToken(variantValue, 'Resource')}`;
+    const resourceName = expectedComponentResourceName(component, meta);
+    const nextName = `${property}=${sanitizeVariantToken(resourceName, 'Resource')}`;
     if (component.name !== nextName) {
       component.name = nextName;
       repaired++;
     }
+    repairComponentVariantMeta(component, meta, property, resourceName);
   }
+  repairComponentSetVariantMeta(componentSet, setMeta, property);
   return repaired;
 }
 
 async function normalizeComponentSetVariantNamesInChunks(componentSet) {
   if (!componentSet || componentSet.removed || componentSet.type !== 'COMPONENT_SET') return 0;
   const setMeta = readMeta(componentSet) || {};
-  const property = sanitizeVariantToken(
-    setMeta.variantProperty || variantPropertyName(componentSet),
-    DEFAULT_VARIANT_PROPERTY
-  );
+  const property = resolveComponentSetVariantProperty(componentSet, setMeta);
   const components = componentSet.children.filter((component) => component.type === 'COMPONENT');
   const yieldComponents = createMainThreadYielder();
   let repaired = 0;
@@ -1082,13 +1315,13 @@ async function normalizeComponentSetVariantNamesInChunks(componentSet) {
   for (let index = 0; index < components.length; index++) {
     const component = components[index];
     const meta = readMeta(component) || {};
-    const resourceName = componentResourceName(component, meta, meta.relativePath || '');
-    const variantValue = meta.variantValue || resourceName;
-    const nextName = `${property}=${sanitizeVariantToken(variantValue, 'Resource')}`;
+    const resourceName = expectedComponentResourceName(component, meta);
+    const nextName = `${property}=${sanitizeVariantToken(resourceName, 'Resource')}`;
     if (component.name !== nextName) {
       component.name = nextName;
       repaired++;
     }
+    repairComponentVariantMeta(component, meta, property, resourceName);
     await yieldComponents(index + 1 < components.length, () => {
       emitSyncProgress(componentSet.name || '', 'repair-names', {
         completed: index + 1,
@@ -1096,7 +1329,58 @@ async function normalizeComponentSetVariantNamesInChunks(componentSet) {
       });
     });
   }
+  repairComponentSetVariantMeta(componentSet, setMeta, property);
   return repaired;
+}
+
+function resolveComponentSetVariantProperty(componentSet, setMeta) {
+  const expectedProperties = new Set();
+  if (activeSync && activeSync.manifestByPath) {
+    for (const component of componentSet.children) {
+      if (component.type !== 'COMPONENT') continue;
+      const meta = readMeta(component) || {};
+      const entry = activeSync.manifestByPath.get(normalizeRelativePath(meta.relativePath));
+      if (!entry || !shouldUseComponentSet(entry)) continue;
+      expectedProperties.add(sanitizeVariantToken(
+        entry.variantProperty || DEFAULT_VARIANT_PROPERTY,
+        DEFAULT_VARIANT_PROPERTY
+      ));
+    }
+  }
+  if (expectedProperties.size === 1) return Array.from(expectedProperties)[0];
+  return sanitizeVariantToken(
+    (setMeta && setMeta.variantProperty) || variantPropertyName(componentSet),
+    DEFAULT_VARIANT_PROPERTY
+  );
+}
+
+function expectedComponentResourceName(component, meta) {
+  if (activeSync && activeSync.manifestByPath) {
+    const entry = activeSync.manifestByPath.get(normalizeRelativePath(meta && meta.relativePath));
+    if (entry && entry.name) return entry.name;
+  }
+  return componentResourceName(component, meta, (meta && meta.relativePath) || '');
+}
+
+function repairComponentVariantMeta(component, meta, property, resourceName) {
+  if (!meta || meta.role !== 'component') return;
+  if (meta.variantProperty === property &&
+      meta.variantValue === resourceName &&
+      meta.resourceName === resourceName) return;
+  writeMeta(component, {
+    ...meta,
+    resourceName,
+    variantProperty: property,
+    variantValue: resourceName
+  });
+}
+
+function repairComponentSetVariantMeta(componentSet, setMeta, property) {
+  if (!setMeta || setMeta.role !== 'component-set' || setMeta.variantProperty === property) return;
+  writeMeta(componentSet, {
+    ...setMeta,
+    variantProperty: property
+  });
 }
 
 async function repairSelectedComponentSetNames() {
@@ -1866,9 +2150,9 @@ function attachComponentToManagedGroup(component, entry) {
     const anchorY = standalone.y;
     const standaloneMeta = readMeta(standalone) || {};
     standalone.name = `${sanitizeVariantToken(
-      standaloneMeta.variantProperty || entry.variantProperty,
+      entry.variantProperty || standaloneMeta.variantProperty,
       DEFAULT_VARIANT_PROPERTY
-    )}=${sanitizeVariantToken(standaloneMeta.variantValue || componentResourceName(
+    )}=${sanitizeVariantToken(componentResourceName(
       standalone,
       standaloneMeta,
       standaloneMeta.relativePath || ''
@@ -2608,7 +2892,7 @@ function writeComponentMeta(component, entry, libraryId, hash) {
     componentSetKey: entry.componentSetKey || null,
     componentSetName: entry.componentSetName || '',
     variantProperty: entry.variantProperty || DEFAULT_VARIANT_PROPERTY,
-    variantValue: entry.variantValue || entry.name,
+    variantValue: entry.name,
     classificationSource: entry.classificationSource || 'strict',
     classificationConfidence: Number(entry.classificationConfidence) || 0
   });

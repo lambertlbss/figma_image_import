@@ -1049,6 +1049,25 @@ test('MCP classification request round-trips through shared plugin data and appl
   assert.equal(published.assetCount, 2);
   const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
   assert.equal(request.requestId, published.requestId);
+  assert.equal(request.fileKey, 'test-file-key');
+  assert.equal(request.pageId, runtime.figma.currentPage.id);
+  assert.equal(request.pageName, 'Page 1');
+  assert.equal(
+    request.pageUrl,
+    `https://www.figma.com/design/test-file-key/current-page?node-id=${runtime.figma.currentPage.id.replace(/:/g, '-')}`
+  );
+  assert.equal(published.pageUrl, request.pageUrl);
+  assert.match(published.prompt, new RegExp(`当前页面链接：${request.pageUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(published.prompt, /页面名称：Page 1/);
+  assert.match(published.prompt, /固定使用资源名作为 Variant 值/);
+  assert.match(published.prompt, /必须做双向审核/);
+  assert.match(published.prompt, /合并跨尺寸/);
+  assert.ok(Array.isArray(request.semanticCandidates));
+  assert.ok(Array.isArray(request.classificationGuidance.requiredPasses));
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(request.responseContract.groups[0].members)),
+    ['folder/file.png']
+  );
   assert.equal(request.assets.length, 2);
   assert.equal(request.strictGroups.length, 0);
 
@@ -1078,7 +1097,156 @@ test('MCP classification request round-trips through shared plugin data and appl
   const componentSet = runtime.section('common').children.find((node) => node.type === 'COMPONENT_SET');
   assert.ok(componentSet);
   assert.equal(componentSet.name, 'Controls/Close');
-  assert.deepEqual(componentSet.children.map((node) => node.name).sort(), ['Size=Compact', 'Size=Primary']);
+  assert.deepEqual(
+    componentSet.children.map((node) => node.name).sort(),
+    ['Size=close_compact', 'Size=close_primary']
+  );
+});
+
+test('AI classification collapses legacy multi-property variants to one Property with resource-name values', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/close_primary.png', 'common', 'close_primary', 'h-primary', 24, 24),
+    asset('common/close_compact.png', 'common', 'close_compact', 'h-compact', 24, 24)
+  ];
+  await importAll(runtime, manifest);
+
+  const legacySet = runtime.section('common').children.find((node) => node.type === 'COMPONENT_SET');
+  const legacySetMeta = JSON.parse(legacySet.getPluginData(META_KEY));
+  legacySet.setPluginData(META_KEY, JSON.stringify({
+    ...legacySetMeta,
+    variantProperty: 'Legacy'
+  }));
+  legacySet.children.forEach((component, index) => {
+    const meta = JSON.parse(component.getPluginData(META_KEY));
+    component.setPluginData(META_KEY, JSON.stringify({
+      ...meta,
+      variantProperty: 'Legacy',
+      variantValue: index === 0 ? 'Primary' : 'Compact'
+    }));
+    component.name = `Legacy=${index === 0 ? 'Primary' : 'Compact'}, Theme=${index === 0 ? 'Light' : 'Dark'}`;
+  });
+
+  await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+    schemaVersion: 1,
+    requestId: published.requestId,
+    groups: [{
+      id: 'close-controls',
+      name: 'Controls/Close',
+      confidence: 0.98,
+      variantProperty: 'State',
+      members: [
+        { relativePath: 'common/close_primary.png', variantValue: 'AI Primary' },
+        { relativePath: 'common/close_compact.png', variantValue: 'AI Compact' }
+      ]
+    }],
+    standalone: []
+  });
+  await runtime.send('load-classification-plan', {});
+  await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
+  await runtime.send('finish-sync', {});
+
+  const componentSet = runtime.section('common').children.find((node) => node.type === 'COMPONENT_SET');
+  assert.ok(componentSet);
+  assert.deepEqual(
+    componentSet.children.map((node) => node.name).sort(),
+    ['State=close_compact', 'State=close_primary']
+  );
+  for (const component of componentSet.children) {
+    assert.equal(component.name.split(',').length, 1);
+    assert.equal((component.name.match(/=/g) || []).length, 1);
+    const meta = JSON.parse(component.getPluginData(META_KEY));
+    assert.equal(meta.variantProperty, 'State');
+    assert.equal(meta.variantValue, meta.resourceName);
+  }
+});
+
+test('MCP classification requests discover cross-size semantic series without over-grouping incompatible prefixes', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/zhandouli/zhandouli_2_0.png', 'common', 'zhandouli_2_0', 'h-p0', 24, 31),
+    asset('common/zhandouli/zhandouli_2_1.png', 'common', 'zhandouli_2_1', 'h-p1', 15, 31),
+    asset('common/zhandouli/zhandouli_2_2.png', 'common', 'zhandouli_2_2', 'h-p2', 24, 31),
+    asset('common/zhandouli/zhandouli_2_3.png', 'common', 'zhandouli_2_3', 'h-p3', 22, 31),
+    asset('common/zhandouli/zhandouli_2_4.png', 'common', 'zhandouli_2_4', 'h-p4', 24, 31),
+    asset('common/zhandouli/zhandouli_2_5.png', 'common', 'zhandouli_2_5', 'h-p5', 25, 31),
+    asset('common/战斗字体/img_shanghai_01_0.png', 'common', 'img_shanghai_01_0', 'h-d0', 24, 32),
+    asset('common/战斗字体/img_shanghai_01_1.png', 'common', 'img_shanghai_01_1', 'h-d1', 16, 32),
+    asset('common/战斗字体/img_shanghai_01_2.png', 'common', 'img_shanghai_01_2', 'h-d2', 22, 32),
+    asset('common/战斗字体/img_shanghai_01_3.png', 'common', 'img_shanghai_01_3', 'h-d3', 22, 32),
+    asset('common/战斗字体/img_shanghai_01_4.png', 'common', 'img_shanghai_01_4', 'h-d4', 24, 32),
+    asset('common/战斗字体/img_shanghai_01_bao.png', 'common', 'img_shanghai_01_bao', 'h-db', 34, 36),
+    asset('common/button_normal.png', 'common', 'button_normal', 'h-normal', 24, 24),
+    asset('common/button_hover.png', 'common', 'button_hover', 'h-hover', 25, 24),
+    asset('common/button_disabled.png', 'common', 'button_disabled', 'h-disabled', 24, 24),
+    asset('common/icon_arrow_left.png', 'common', 'icon_arrow_left', 'h-left', 20, 20),
+    asset('common/icon_arrow_right.png', 'common', 'icon_arrow_right', 'h-right', 20, 20),
+    asset('common/icon_arrow_up.png', 'common', 'icon_arrow_up', 'h-up', 20, 21),
+    asset('common/quality_red.png', 'common', 'quality_red', 'h-red', 32, 32),
+    asset('common/quality_blue.png', 'common', 'quality_blue', 'h-blue', 32, 32),
+    asset('common/quality_purple.png', 'common', 'quality_purple', 'h-purple', 32, 32),
+    asset('common/badge_x1.png', 'common', 'badge_x1', 'h-x1', 16, 16),
+    asset('common/badge_x2.png', 'common', 'badge_x2', 'h-x2', 32, 32),
+    asset('common/badge_x3.png', 'common', 'badge_x3', 'h-x3', 48, 48),
+    asset('common/sparkle_frame_001.png', 'common', 'sparkle_frame_001', 'h-f1', 30, 30),
+    asset('common/sparkle_frame_002.png', 'common', 'sparkle_frame_002', 'h-f2', 31, 30),
+    asset('common/sparkle_frame_003.png', 'common', 'sparkle_frame_003', 'h-f3', 30, 30),
+    asset('common/common_bg_panel_01.png', 'common', 'common_bg_panel_01', 'h-bg1', 20, 20),
+    asset('common/common_bg_panel_04.png', 'common', 'common_bg_panel_04', 'h-bg4', 400, 100),
+    asset('common/common_bg_panel_99.png', 'common', 'common_bg_panel_99', 'h-bg99', 50, 300)
+  ];
+  await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+  const byPrefix = new Map(request.semanticCandidates.map((candidate) => [
+    candidate.stablePrefix,
+    candidate
+  ]));
+
+  const power = byPrefix.get('zhandouli_2');
+  assert.ok(power);
+  assert.equal(power.relationType, 'glyph-series');
+  assert.equal(power.suggestedVariantProperty, '字形');
+  assert.equal(power.members.length, 6);
+  assert.equal(power.evidence.crossesStrictSizes, true);
+  assert.ok(power.evidence.sizes.includes('15x31'));
+  assert.ok(power.evidence.sizes.includes('25x31'));
+
+  const damage = byPrefix.get('img_shanghai_01');
+  assert.ok(damage);
+  assert.equal(damage.relationType, 'glyph-series');
+  assert.equal(damage.members.length, 6);
+  assert.equal(damage.evidence.crossesStrictSizes, true);
+
+  const states = byPrefix.get('button');
+  assert.ok(states);
+  assert.equal(states.relationType, 'state-series');
+  assert.equal(states.suggestedVariantProperty, '状态');
+  assert.equal(states.members.length, 3);
+
+  assert.equal(byPrefix.get('icon_arrow').relationType, 'direction-series');
+  assert.equal(byPrefix.get('quality').relationType, 'quality-series');
+  assert.equal(byPrefix.get('badge').relationType, 'scale-series');
+  assert.equal(byPrefix.get('sparkle_frame').relationType, 'frame-series');
+  assert.equal(byPrefix.has('common_bg_panel'), false);
+  assert.equal(published.semanticCandidateCount, request.semanticCandidates.length);
+  assert.ok(request.classificationGuidance.requiredPasses.some((rule) =>
+    rule.includes('合并跨尺寸')
+  ));
 });
 
 test('AI classification plans reject duplicate membership before touching the canvas', async () => {
@@ -1158,6 +1326,7 @@ test('large MCP classification requests stay below the shared plugin data entry 
   assert.equal(request.assets.length, manifest.length);
   assert.equal(request.strictGroups.length, 1);
   assert.equal(request.strictGroups[0].members.length, manifest.length);
+  assert.ok(request.strictGroups[0].members.every((member) => !Object.prototype.hasOwnProperty.call(member, 'variantValue')));
   for (const value of runtime.figma.currentPage._sharedPluginData.values()) {
     assert.ok(Buffer.byteLength(value, 'utf8') <= 100000);
   }
