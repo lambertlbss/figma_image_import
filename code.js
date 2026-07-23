@@ -1,10 +1,16 @@
 // Figma Image Folder Importer
 // Incremental synchronisation engine. Unchanged managed nodes are never rewritten or moved.
 
-figma.showUI(__html__, { width: 380, height: 620 });
+figma.showUI(__html__, { width: 380, height: 720 });
 
 const META_KEY = 'imageFolderImporterMeta';
 const META_VERSION = 1;
+const SHARED_DATA_NAMESPACE = 'figma_image_importer';
+const CLASSIFICATION_REQUEST_KEY = 'classification-request';
+const CLASSIFICATION_PLAN_KEY = 'classification-plan';
+const CLASSIFICATION_SCHEMA_VERSION = 1;
+const CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.7;
+const SHARED_DATA_CHUNK_CHAR_LIMIT = 20000;
 
 const SECTION_GAP = 80;
 const SECTION_PADDING = 192;
@@ -20,6 +26,8 @@ const COMPONENT_SET_STROKE_COLOR = {
   g: 56 / 255,
   b: 245 / 255
 };
+const MAIN_THREAD_YIELD_ITEMS = 64;
+const MAIN_THREAD_YIELD_MS = 16;
 
 let activeSync = null;
 let preparedScanCache = null;
@@ -37,7 +45,7 @@ figma.ui.onmessage = async (message) => {
         data = prepareSync(message.payload || {});
         break;
       case 'begin-sync':
-        data = beginSync(message.payload || {});
+        data = await beginSync(message.payload || {});
         break;
       case 'apply-file':
         data = await applyFile(message.payload || {});
@@ -46,7 +54,16 @@ figma.ui.onmessage = async (message) => {
         data = await applyBatch(message.payload || {});
         break;
       case 'finish-sync':
-        data = finishSync();
+        data = await finishSync();
+        break;
+      case 'set-classification-mode':
+        data = setClassificationMode(message.payload || {});
+        break;
+      case 'publish-classification-request':
+        data = publishClassificationRequest(message.payload || {});
+        break;
+      case 'load-classification-plan':
+        data = loadClassificationPlan();
         break;
       default:
         throw new Error(`未知消息类型：${message.type}`);
@@ -143,10 +160,13 @@ function prepareScan(payload) {
 function prepareSync(payload) {
   const startedAt = Date.now();
   const rootName = String(payload.rootName || '').trim() || 'resources';
-  const manifest = sanitizeManifest(payload.manifest || []);
-  if (manifest.length === 0) throw new Error('没有可同步的 PNG 文件。');
+  const baseManifest = sanitizeManifest(payload.manifest || []);
+  if (baseManifest.length === 0) throw new Error('没有可同步的 PNG 文件。');
+  const classificationMode = normalizeClassificationMode(payload.classificationMode);
+  const classified = classifyManifest(baseManifest, classificationMode, payload.classificationPlan || null);
+  const manifest = classified.manifest;
 
-  const manifestKey = scanManifestKey(manifest);
+  const manifestKey = scanManifestKey(baseManifest);
   const canReusePreparedScan = preparedScanCache &&
     preparedScanCache.rootName === rootName &&
     preparedScanCache.manifestKey === manifestKey;
@@ -157,10 +177,10 @@ function prepareSync(payload) {
   if (canReusePreparedScan) {
     ({ libraryId, adoption, index } = preparedScanCache);
   } else {
-    const localFolderPaths = new Set(manifest.map((entry) => entry.folderPath));
+    const localFolderPaths = new Set(baseManifest.map((entry) => entry.folderPath));
     const library = chooseLibrary(rootName, localFolderPaths);
     libraryId = library ? library.libraryId : createLibraryId(rootName);
-    adoption = adoptLegacySections(manifest, libraryId, rootName);
+    adoption = adoptLegacySections(baseManifest, libraryId, rootName);
     index = scanLibrary(libraryId);
   }
   preparedScanCache = null;
@@ -169,10 +189,16 @@ function prepareSync(payload) {
   activeSync = {
     rootName,
     libraryId,
+    baseManifest,
     manifest,
     manifestByPath: new Map(manifest.map((entry) => [entry.relativePath, entry])),
     index,
     plan,
+    legacyConflictPaths: new Set(adoption.conflictPaths || []),
+    legacyConflicts: Array.isArray(adoption.conflicts) ? adoption.conflicts.slice() : [],
+    classificationMode,
+    classificationSummary: classified.summary,
+    classificationRequestId: '',
     expectedComponentSetGroups: plan.expectedComponentSetGroups,
     selectedFolders: new Set(),
     deleteMissing: false,
@@ -190,20 +216,288 @@ function prepareSync(payload) {
     started: false
   };
 
-  return {
-    rootName,
-    libraryId,
+  return serializeActiveSyncPlan({
     adopted: canReusePreparedScan ? 0 : adoption.adopted,
-    conflicts: adoption.conflicts,
-    actions: plan.actions.map(serializeAction),
-    folders: buildFolderSummaries(plan, index),
-    summary: countActions(plan.actions),
     scanIndexReused: Boolean(canReusePreparedScan),
     timingMs: Date.now() - startedAt
+  });
+}
+
+function setClassificationMode(payload) {
+  assertActiveSync();
+  if (activeSync.started) throw new Error('同步已开始，不能再切换分类方式。');
+  const mode = normalizeClassificationMode(payload.mode);
+  return rebuildActiveSyncClassification(mode, null);
+}
+
+function publishClassificationRequest(payload) {
+  assertActiveSync();
+  if (activeSync.started) throw new Error('同步已开始，不能再生成 AI 请求。');
+  const availableFolders = new Set(activeSync.baseManifest.map((entry) => entry.folderPath));
+  const selectedFolders = new Set(
+    (Array.isArray(payload.selectedFolders) ? payload.selectedFolders : [])
+      .map(normalizeFolderPath)
+      .filter((folderPath) => availableFolders.has(folderPath))
+  );
+  if (selectedFolders.size === 0) throw new Error('请先在下方至少选择一个文件夹。');
+  const requestId = `classification-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const requestManifest = activeSync.baseManifest.filter((entry) => selectedFolders.has(entry.folderPath));
+  const assets = requestManifest.map((entry) => {
+    const component = activeSync.index.components.get(entry.relativePath);
+    return {
+      relativePath: entry.relativePath,
+      folderPath: entry.folderPath,
+      name: entry.name,
+      width: entry.width,
+      height: entry.height,
+      nodeId: component && !component.removed ? component.id : null
+    };
+  });
+  const smart = classifyManifest(requestManifest, 'smart', null);
+  const smartGroups = summarizeClassificationGroups(smart.manifest);
+  const request = {
+    schemaVersion: CLASSIFICATION_SCHEMA_VERSION,
+    requestId,
+    createdAt: new Date().toISOString(),
+    fileKey: figma.fileKey || null,
+    pageId: figma.currentPage.id,
+    rootName: activeSync.rootName,
+    libraryId: activeSync.libraryId,
+    selectedFolders: Array.from(selectedFolders),
+    assets,
+    smartGroups,
+    responseContract: {
+      schemaVersion: CLASSIFICATION_SCHEMA_VERSION,
+      requestId,
+      groups: [{
+        id: 'stable-group-id',
+        name: '组件集名称',
+        confidence: 0.95,
+        variantProperty: 'Variant',
+        members: [{ relativePath: 'folder/file.png', variantValue: 'value' }]
+      }],
+      standalone: ['folder/file.png'],
+      transport: {
+        namespace: SHARED_DATA_NAMESPACE,
+        indexKey: CLASSIFICATION_PLAN_KEY,
+        encoding: 'chunked-json',
+        chunkKeyPattern: `${CLASSIFICATION_PLAN_KEY}_{index}`,
+        maxChunkCharacters: SHARED_DATA_CHUNK_CHAR_LIMIT,
+        writeIndexLast: true
+      }
+    }
+  };
+  const transport = writeChunkedSharedJson(CLASSIFICATION_REQUEST_KEY, request);
+  clearChunkedSharedJson(CLASSIFICATION_PLAN_KEY);
+  activeSync.classificationRequestId = requestId;
+  activeSync.classificationRequestFolders = new Set(selectedFolders);
+  activeSync.classificationRequestPaths = new Set(requestManifest.map((entry) => entry.relativePath));
+  return {
+    requestId,
+    pageId: figma.currentPage.id,
+    fileKey: figma.fileKey || null,
+    assetCount: assets.length,
+    folderCount: selectedFolders.size,
+    selectedFolders: Array.from(selectedFolders),
+    smartGroupCount: smartGroups.length,
+    namespace: SHARED_DATA_NAMESPACE,
+    requestKey: CLASSIFICATION_REQUEST_KEY,
+    planKey: CLASSIFICATION_PLAN_KEY,
+    requestChunks: transport.chunkCount,
+    prompt: buildClassificationPrompt(request)
   };
 }
 
-function beginSync(payload) {
+function loadClassificationPlan() {
+  assertActiveSync();
+  if (activeSync.started) throw new Error('同步已开始，不能再读取 AI 分类方案。');
+  const plan = readSharedJson(CLASSIFICATION_PLAN_KEY, 'AI 分类方案');
+  if (Number(plan.schemaVersion) !== CLASSIFICATION_SCHEMA_VERSION) {
+    throw new Error(`AI 分类方案版本不兼容：${plan.schemaVersion || '未知'}`);
+  }
+  if (!activeSync.classificationRequestId) {
+    throw new Error('当前扫描尚未生成 AI 分类请求。');
+  }
+  if (plan.requestId !== activeSync.classificationRequestId) {
+    throw new Error('AI 分类方案不属于当前扫描请求，请重新生成。');
+  }
+  validateAiPlanScope(
+    plan,
+    activeSync.classificationRequestPaths,
+    new Set(activeSync.baseManifest.map((entry) => entry.relativePath))
+  );
+  return rebuildActiveSyncClassification('ai', plan);
+}
+
+function validateAiPlanScope(plan, allowedPaths, manifestPaths) {
+  if (!(allowedPaths instanceof Set) || allowedPaths.size === 0) {
+    throw new Error('当前 AI 请求没有有效的文件夹范围，请重新生成。');
+  }
+  const referenced = [];
+  for (const group of Array.isArray(plan.groups) ? plan.groups : []) {
+    for (const member of Array.isArray(group && group.members) ? group.members : []) {
+      const normalized = normalizeAiPlanMember(member);
+      if (normalized) referenced.push(normalized.relativePath);
+    }
+  }
+  for (const relativePath of Array.isArray(plan.standalone) ? plan.standalone : []) {
+    referenced.push(normalizeRelativePath(relativePath));
+  }
+  const missing = referenced.filter((relativePath) => relativePath && !manifestPaths.has(relativePath));
+  if (missing.length > 0) {
+    throw new Error(`AI 分类方案引用了不存在的资源：${missing[0]}`);
+  }
+  const outside = referenced.filter((relativePath) => relativePath && !allowedPaths.has(relativePath));
+  if (outside.length > 0) {
+    throw new Error(`AI 分类方案包含未选中文件夹的资源：${outside[0]}`);
+  }
+}
+
+function rebuildActiveSyncClassification(mode, aiPlan) {
+  const classified = classifyManifest(activeSync.baseManifest, mode, aiPlan);
+  const plan = buildSyncPlan(classified.manifest, activeSync.index, activeSync.legacyConflictPaths);
+  activeSync.classificationMode = normalizeClassificationMode(mode);
+  activeSync.classificationSummary = classified.summary;
+  activeSync.manifest = classified.manifest;
+  activeSync.manifestByPath = new Map(classified.manifest.map((entry) => [entry.relativePath, entry]));
+  activeSync.plan = plan;
+  activeSync.expectedComponentSetGroups = plan.expectedComponentSetGroups;
+  return serializeActiveSyncPlan({ adopted: 0, scanIndexReused: true, timingMs: 0 });
+}
+
+function serializeActiveSyncPlan(extra) {
+  return {
+    rootName: activeSync.rootName,
+    libraryId: activeSync.libraryId,
+    adopted: Number(extra && extra.adopted) || 0,
+    conflicts: activeSync.legacyConflicts || [],
+    actions: activeSync.plan.actions.map(serializeAction),
+    folders: buildFolderSummaries(activeSync.plan, activeSync.index),
+    summary: countActions(activeSync.plan.actions),
+    classification: activeSync.classificationSummary,
+    scanIndexReused: Boolean(extra && extra.scanIndexReused),
+    timingMs: Number(extra && extra.timingMs) || 0
+  };
+}
+
+function summarizeClassificationGroups(manifest) {
+  const groups = new Map();
+  for (const entry of manifest) {
+    if (!entry.componentSetKey) continue;
+    const id = groupKey(entry.folderPath, entry.componentSetKey);
+    if (!groups.has(id)) groups.set(id, {
+      id: entry.componentSetKey,
+      name: entry.componentSetName,
+      folderPath: entry.folderPath,
+      variantProperty: entry.variantProperty,
+      confidence: entry.classificationConfidence,
+      members: []
+    });
+    groups.get(id).members.push({
+      relativePath: entry.relativePath,
+      variantValue: entry.variantValue,
+      width: entry.width,
+      height: entry.height
+    });
+  }
+  return Array.from(groups.values());
+}
+
+function buildClassificationPrompt(request) {
+  return [
+    '请使用 Figma MCP 审核当前页面的图片组件分类。',
+    `页面节点：${request.pageId}`,
+    `读取 shared plugin data 索引：namespace="${SHARED_DATA_NAMESPACE}", key="${CLASSIFICATION_REQUEST_KEY}"。`,
+    '该索引是 encoding="chunked-json" 的 JSON；按 chunkKeys 顺序读取所有分片，拼接字符串后 JSON.parse 得到请求。',
+    '结合资源名称、尺寸、现有节点截图和智能规则候选组，输出保守的组件集方案。',
+    `将结果按 request.responseContract 写回同一页面：namespace="${SHARED_DATA_NAMESPACE}", index key="${CLASSIFICATION_PLAN_KEY}"。`,
+    `先 JSON.stringify 方案，按最多 ${SHARED_DATA_CHUNK_CHAR_LIMIT} 个字符拆分并依次写入 ${CLASSIFICATION_PLAN_KEY}_0、${CLASSIFICATION_PLAN_KEY}_1…；最后再写索引 key。`,
+    '索引格式：{"encoding":"chunked-json","chunkCount":N,"chunkKeys":[...],"schemaVersion":1,"requestId":"..."}。',
+    '不要直接移动或合并节点；只写回分类计划，由插件校验和执行。'
+  ].join('\n');
+}
+
+function writeChunkedSharedJson(baseKey, value) {
+  clearChunkedSharedJson(baseKey);
+  const serialized = JSON.stringify(value);
+  const chunks = splitSharedDataChunks(serialized);
+  const chunkKeys = chunks.map((_, index) => `${baseKey}_${index}`);
+  for (let index = 0; index < chunks.length; index++) {
+    figma.currentPage.setSharedPluginData(SHARED_DATA_NAMESPACE, chunkKeys[index], chunks[index]);
+  }
+  const index = {
+    encoding: 'chunked-json',
+    chunkCount: chunks.length,
+    chunkKeys,
+    schemaVersion: CLASSIFICATION_SCHEMA_VERSION,
+    requestId: value && value.requestId ? value.requestId : null
+  };
+  figma.currentPage.setSharedPluginData(SHARED_DATA_NAMESPACE, baseKey, JSON.stringify(index));
+  return index;
+}
+
+function readSharedJson(baseKey, label) {
+  const raw = figma.currentPage.getSharedPluginData(SHARED_DATA_NAMESPACE, baseKey);
+  if (!raw) throw new Error(`尚未发现${label}，请先让 MCP 客户端写回 ${baseKey}。`);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    throw new Error(`${label}索引不是有效 JSON。`);
+  }
+  if (!parsed || parsed.encoding !== 'chunked-json') return parsed;
+  const chunkKeys = Array.isArray(parsed.chunkKeys) ? parsed.chunkKeys : [];
+  if (chunkKeys.length === 0 || chunkKeys.length !== Number(parsed.chunkCount)) {
+    throw new Error(`${label}分片索引无效。`);
+  }
+  let serialized = '';
+  for (const chunkKey of chunkKeys) {
+    const chunk = figma.currentPage.getSharedPluginData(SHARED_DATA_NAMESPACE, String(chunkKey));
+    if (!chunk) throw new Error(`${label}缺少分片：${chunkKey}`);
+    serialized += chunk;
+  }
+  try {
+    return JSON.parse(serialized);
+  } catch (_) {
+    throw new Error(`${label}分片拼接后不是有效 JSON。`);
+  }
+}
+
+function clearChunkedSharedJson(baseKey) {
+  const raw = figma.currentPage.getSharedPluginData(SHARED_DATA_NAMESPACE, baseKey);
+  if (raw) {
+    try {
+      const index = JSON.parse(raw);
+      if (index && index.encoding === 'chunked-json' && Array.isArray(index.chunkKeys)) {
+        for (const chunkKey of index.chunkKeys) {
+          figma.currentPage.setSharedPluginData(SHARED_DATA_NAMESPACE, String(chunkKey), '');
+        }
+      }
+    } catch (_) {
+      // A legacy direct JSON entry has no chunks to remove.
+    }
+  }
+  figma.currentPage.setSharedPluginData(SHARED_DATA_NAMESPACE, baseKey, '');
+}
+
+function splitSharedDataChunks(value) {
+  const chunks = [];
+  let offset = 0;
+  while (offset < value.length) {
+    let end = Math.min(value.length, offset + SHARED_DATA_CHUNK_CHAR_LIMIT);
+    if (end < value.length && end > offset) {
+      const lastCodeUnit = value.charCodeAt(end - 1);
+      const nextCodeUnit = value.charCodeAt(end);
+      if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff &&
+          nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) end--;
+    }
+    chunks.push(value.slice(offset, end));
+    offset = end;
+  }
+  return chunks.length > 0 ? chunks : [''];
+}
+
+async function beginSync(payload) {
   const startedAt = Date.now();
   assertActiveSync();
   const selectedFolders = Array.isArray(payload.selectedFolders)
@@ -229,12 +523,13 @@ function beginSync(payload) {
     activeSync.selectedFolders.has(action.folderPath)
   );
 
-  repairSelectedComponentSetNames();
+  await repairSelectedComponentSetNames();
 
   // Moves are metadata/layout operations and do not need image bytes. This also
   // performs the one-time migration from old deep-folder Sections into their
   // first-level Section.
   const moveActions = selectedActions.filter((item) => item.type === 'move');
+  const yieldMoves = createMainThreadYielder();
   for (let index = 0; index < moveActions.length; index++) {
     const action = moveActions[index];
     emitSyncProgress(action.entry.relativePath, 'structure', {
@@ -248,6 +543,12 @@ function beginSync(payload) {
       activeSync.stats.skipped++;
       activeSync.warnings.push(`${action.entry.relativePath}：${formatError(error)}`);
     }
+    await yieldMoves(index + 1 < moveActions.length, () => {
+      emitSyncProgress(action.entry.relativePath, 'structure', {
+        completed: index + 1,
+        total: moveActions.length
+      });
+    });
   }
 
   activeSync.pendingDeletes = selectedActions.filter((item) =>
@@ -275,8 +576,16 @@ async function applyBatch(payload) {
 
   emitSyncProgress(files[0].relativePath, 'batch', { total: files.length });
   const results = [];
-  for (const file of files) {
+  const yieldFiles = createMainThreadYielder();
+  for (let index = 0; index < files.length; index++) {
+    const file = files[index];
     results.push(await applyFile(file, { reportProgress: false }));
+    await yieldFiles(index + 1 < files.length, () => {
+      emitSyncProgress(file.relativePath, 'batch-item', {
+        completed: index + 1,
+        total: files.length
+      });
+    });
   }
   emitSyncProgress(files[files.length - 1].relativePath, 'batch-done', {
     total: files.length
@@ -358,13 +667,15 @@ async function applyFile(payload, options) {
   }
 }
 
-function finishSync() {
+async function finishSync() {
   const finishStartedAt = Date.now();
   assertActiveSync();
 
   const deleteStartedAt = Date.now();
   if (activeSync.stats.skipped === 0) {
-    for (const action of activeSync.pendingDeletes) {
+    const yieldDeletes = createMainThreadYielder();
+    for (let index = 0; index < activeSync.pendingDeletes.length; index++) {
+      const action = activeSync.pendingDeletes[index];
       try {
         deleteManagedComponent(action);
         activeSync.stats.deleted++;
@@ -372,6 +683,12 @@ function finishSync() {
         activeSync.stats.skipped++;
         activeSync.warnings.push(`${action.relativePath}：${formatError(error)}`);
       }
+      await yieldDeletes(index + 1 < activeSync.pendingDeletes.length, () => {
+        emitSyncProgress(action.relativePath, 'delete', {
+          completed: index + 1,
+          total: activeSync.pendingDeletes.length
+        });
+      });
     }
   } else if (activeSync.pendingDeletes.length > 0) {
     activeSync.warnings.push(
@@ -385,10 +702,10 @@ function finishSync() {
     componentSets: activeSync.touchedComponentSets.size,
     sections: activeSync.touchedSections.size
   });
-  dissolveSingletonComponentSets();
-  compactTouchedComponentSets();
-  cleanupTouchedSections();
-  layoutMovableSections();
+  await dissolveSingletonComponentSets();
+  await compactTouchedComponentSets();
+  await cleanupTouchedSections();
+  await layoutMovableSections();
   const layoutMs = Date.now() - layoutStartedAt;
 
   const nodes = Array.from(activeSync.touchedNodes).filter((node) => node && !node.removed);
@@ -451,13 +768,289 @@ function sanitizeManifest(items) {
 
   const result = Array.from(newestByName.values());
   result.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-  const layoutCounters = new Map();
-  for (const entry of result) {
-    const key = groupKey(entry.folderPath, sizeKey(entry.width, entry.height));
-    entry.layoutOrder = layoutCounters.get(key) || 0;
-    layoutCounters.set(key, entry.layoutOrder + 1);
-  }
   return result;
+}
+
+function normalizeClassificationMode(value) {
+  return value === 'smart' || value === 'ai' ? value : 'strict';
+}
+
+function classifyManifest(baseManifest, mode, aiPlan) {
+  const normalizedMode = normalizeClassificationMode(mode);
+  const manifest = baseManifest.map((entry) => ({
+    ...entry,
+    componentSetKey: null,
+    componentSetName: '',
+    variantProperty: DEFAULT_VARIANT_PROPERTY,
+    variantValue: entry.name,
+    classificationSource: 'standalone',
+    classificationConfidence: 0
+  }));
+
+  if (normalizedMode === 'strict') assignStrictClassifications(manifest);
+  else assignSmartClassifications(manifest);
+  if (normalizedMode === 'ai' && aiPlan) applyAiClassificationPlan(manifest, aiPlan);
+  assignClassificationLayoutOrder(manifest);
+
+  const grouped = manifest.filter((entry) => entry.componentSetKey);
+  const groupIds = new Set(grouped.map((entry) => groupKey(entry.folderPath, entry.componentSetKey)));
+  return {
+    manifest,
+    summary: {
+      mode: normalizedMode,
+      groups: groupIds.size,
+      groupedAssets: grouped.length,
+      standaloneAssets: manifest.length - grouped.length,
+      aiGroups: new Set(grouped
+        .filter((entry) => entry.classificationSource === 'ai')
+        .map((entry) => groupKey(entry.folderPath, entry.componentSetKey))).size
+    }
+  };
+}
+
+function assignStrictClassifications(manifest) {
+  for (const entry of manifest) {
+    const key = sizeKey(entry.width, entry.height);
+    assignEntryClassification(entry, {
+      key,
+      name: key,
+      property: DEFAULT_VARIANT_PROPERTY,
+      value: entry.name,
+      source: 'strict',
+      confidence: 1
+    });
+  }
+}
+
+function assignSmartClassifications(manifest) {
+  const candidates = new Map();
+  for (const entry of manifest) {
+    const descriptor = inferVariantDescriptor(entry.name);
+    if (!descriptor) continue;
+    const key = `${entry.folderPath}\u0000${descriptor.family}\u0000${descriptor.kind}`;
+    if (!candidates.has(key)) candidates.set(key, []);
+    candidates.get(key).push({ entry, descriptor });
+  }
+
+  for (const items of candidates.values()) {
+    if (items.length < 2) continue;
+    const clusters = clusterClassificationCandidates(items);
+    for (const cluster of clusters) {
+      if (cluster.length < 2) continue;
+      const descriptor = cluster[0].descriptor;
+      const dimensions = classificationClusterDimensions(cluster);
+      const dimensionKey = descriptor.kind === 'glyph'
+        ? `h${dimensions.minHeight}-${dimensions.maxHeight}`
+        : `${dimensions.minWidth}-${dimensions.maxWidth}x${dimensions.minHeight}-${dimensions.maxHeight}`;
+      const key = `smart:${descriptor.family}:${dimensionKey}`;
+      const name = descriptor.family.replace(/_/g, '/');
+      for (const item of cluster) {
+        assignEntryClassification(item.entry, {
+          key,
+          name,
+          property: descriptor.property,
+          value: item.descriptor.value,
+          source: 'smart',
+          confidence: descriptor.kind === 'glyph' ? 0.9 : 0.82
+        });
+      }
+    }
+  }
+}
+
+function inferVariantDescriptor(name) {
+  const normalized = String(name || '').trim().toLowerCase().replace(/\s+/g, '_');
+  const tokens = normalized.split('_').filter(Boolean);
+  if (tokens.length < 2) return null;
+  const last = tokens[tokens.length - 1];
+  const glyphWords = new Set([
+    '%', '+', '-', 'dian', 'dot', 'plus', 'minus', 'xing', 'wan', 'yi', 'bao', 'ji', 'shang', 'xia'
+  ]);
+  const stateWords = new Set([
+    'a', 'b', 'c', 'up', 'down', 'left', 'right', 'on', 'off', 'normal', 'active', 'selected',
+    'disabled', 'hover', 'pressed', 'open', 'closed'
+  ]);
+
+  const embeddedState = last.match(/^(\d{1,3})([a-z])$/);
+  if (embeddedState) {
+    return {
+      family: tokens.slice(0, -1).concat(embeddedState[1]).join('_'),
+      value: embeddedState[2],
+      kind: 'state',
+      property: 'State'
+    };
+  }
+  if (/^\d$/.test(last) || glyphWords.has(last)) {
+    return {
+      family: tokens.slice(0, -1).join('_'),
+      value: last,
+      kind: 'glyph',
+      property: 'Glyph'
+    };
+  }
+  if (/^\d{2,3}$/.test(last)) {
+    return {
+      family: tokens.slice(0, -1).join('_'),
+      value: last,
+      kind: 'numbered',
+      property: 'Variant'
+    };
+  }
+  if (stateWords.has(last)) {
+    return {
+      family: tokens.slice(0, -1).join('_'),
+      value: last,
+      kind: 'state',
+      property: 'State'
+    };
+  }
+  return null;
+}
+
+function clusterClassificationCandidates(items) {
+  const sorted = items.slice().sort((a, b) =>
+    (a.entry.height - b.entry.height) || (a.entry.width - b.entry.width) ||
+    a.entry.relativePath.localeCompare(b.entry.relativePath)
+  );
+  const clusters = [];
+  for (const item of sorted) {
+    let selected = null;
+    for (const cluster of clusters) {
+      if (classificationCandidateFits(cluster, item)) {
+        selected = cluster;
+        break;
+      }
+    }
+    if (selected) selected.push(item);
+    else clusters.push([item]);
+  }
+  return clusters;
+}
+
+function classificationCandidateFits(cluster, candidate) {
+  const next = cluster.concat(candidate);
+  const dimensions = classificationClusterDimensions(next);
+  if (candidate.descriptor.kind === 'glyph') {
+    return dimensions.maxHeight - dimensions.minHeight <= 4;
+  }
+  return dimensions.maxWidth - dimensions.minWidth <= 2 &&
+    dimensions.maxHeight - dimensions.minHeight <= 2;
+}
+
+function classificationClusterDimensions(cluster) {
+  const widths = cluster.map((item) => item.entry.width);
+  const heights = cluster.map((item) => item.entry.height);
+  return {
+    minWidth: Math.min(...widths),
+    maxWidth: Math.max(...widths),
+    minHeight: Math.min(...heights),
+    maxHeight: Math.max(...heights)
+  };
+}
+
+function applyAiClassificationPlan(manifest, plan) {
+  if (!plan || !Array.isArray(plan.groups)) throw new Error('AI 分类方案缺少 groups 数组。');
+  const byPath = new Map(manifest.map((entry) => [entry.relativePath, entry]));
+  const assigned = new Set();
+  const explicitStandalone = new Set(Array.isArray(plan.standalone) ? plan.standalone.map(normalizeRelativePath) : []);
+  const usedGroupKeys = new Set();
+
+  for (const rawGroup of plan.groups) {
+    const confidence = Number(rawGroup && rawGroup.confidence);
+    if (!rawGroup || !Array.isArray(rawGroup.members) || rawGroup.members.length < 2) continue;
+    if (!Number.isFinite(confidence) || confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD) continue;
+    const members = rawGroup.members.map(normalizeAiPlanMember).filter(Boolean);
+    const missingPaths = members
+      .filter((member) => !byPath.has(member.relativePath))
+      .map((member) => member.relativePath);
+    if (missingPaths.length > 0) {
+      throw new Error(`AI 分类方案引用了不存在的资源：${missingPaths.join('、')}`);
+    }
+    const entries = members.map((member) => byPath.get(member.relativePath));
+    if (entries.length < 2) continue;
+    const folders = new Set(entries.map((entry) => entry.folderPath));
+    if (folders.size !== 1) throw new Error(`AI 组“${rawGroup.name || rawGroup.id || '未命名'}”跨越了多个一级文件夹。`);
+    for (const entry of entries) {
+      if (assigned.has(entry.relativePath)) throw new Error(`AI 分类方案重复分配资源：${entry.relativePath}`);
+      assigned.add(entry.relativePath);
+    }
+    const id = safeClassificationId(rawGroup.id || rawGroup.name || entries[0].name);
+    const groupStorageKey = groupKey(entries[0].folderPath, `ai:${id}`);
+    if (usedGroupKeys.has(groupStorageKey)) {
+      throw new Error(`AI 分类方案存在重复的组 ID：${id}`);
+    }
+    usedGroupKeys.add(groupStorageKey);
+    const property = String(rawGroup.variantProperty || DEFAULT_VARIANT_PROPERTY).trim() || DEFAULT_VARIANT_PROPERTY;
+    const variantValues = members.map((member, index) =>
+      sanitizeVariantToken(member.variantValue || entries[index].name, entries[index].name)
+    );
+    if (new Set(variantValues).size !== variantValues.length) {
+      throw new Error(`AI 组“${rawGroup.name || id}”存在重复的 Variant 值。`);
+    }
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index];
+      assignEntryClassification(entry, {
+        key: `ai:${id}`,
+        name: String(rawGroup.name || id).trim() || id,
+        property,
+        value: variantValues[index],
+        source: 'ai',
+        confidence
+      });
+    }
+  }
+
+  for (const relativePath of explicitStandalone) {
+    const entry = byPath.get(relativePath);
+    if (!entry) throw new Error(`AI 分类方案引用了不存在的资源：${relativePath}`);
+    if (assigned.has(relativePath)) throw new Error(`资源同时出现在 AI 组件集与 standalone 中：${relativePath}`);
+    assignEntryClassification(entry, null);
+  }
+}
+
+function normalizeAiPlanMember(value) {
+  if (typeof value === 'string') {
+    const relativePath = normalizeRelativePath(value);
+    return relativePath ? { relativePath, variantValue: '' } : null;
+  }
+  if (!value || typeof value !== 'object') return null;
+  const relativePath = normalizeRelativePath(value.relativePath || value.path);
+  return relativePath ? { relativePath, variantValue: String(value.variantValue || value.value || '') } : null;
+}
+
+function safeClassificationId(value) {
+  return String(value || 'group').trim().toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff_-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'group';
+}
+
+function assignEntryClassification(entry, classification) {
+  if (!classification) {
+    entry.componentSetKey = null;
+    entry.componentSetName = '';
+    entry.variantProperty = DEFAULT_VARIANT_PROPERTY;
+    entry.variantValue = entry.name;
+    entry.classificationSource = 'standalone';
+    entry.classificationConfidence = 0;
+    return;
+  }
+  entry.componentSetKey = classification.key;
+  entry.componentSetName = classification.name;
+  entry.variantProperty = classification.property || DEFAULT_VARIANT_PROPERTY;
+  entry.variantValue = classification.value || entry.name;
+  entry.classificationSource = classification.source || 'strict';
+  entry.classificationConfidence = Number(classification.confidence) || 0;
+}
+
+function assignClassificationLayoutOrder(manifest) {
+  const counters = new Map();
+  for (const entry of manifest) {
+    const key = entry.componentSetKey
+      ? groupKey(entry.folderPath, entry.componentSetKey)
+      : `${entry.folderPath}\u0000standalone:${entry.relativePath}`;
+    entry.layoutOrder = counters.get(key) || 0;
+    counters.set(key, entry.layoutOrder + 1);
+  }
 }
 
 function isNewerManifestEntry(candidate, previous) {
@@ -550,22 +1143,40 @@ function formatVariantName(componentSet, resourceName) {
   return `${property}=${value}`;
 }
 
-function setManagedComponentName(component, resourceName) {
+function formatEntryVariantName(componentSet, entry) {
+  if (!entry) return formatVariantName(componentSet, 'Resource');
+  const property = sanitizeVariantToken(
+    entry.variantProperty || variantPropertyName(componentSet),
+    DEFAULT_VARIANT_PROPERTY
+  );
+  const value = sanitizeVariantToken(entry.variantValue || entry.name, 'Resource');
+  return `${property}=${value}`;
+}
+
+function setManagedComponentName(component, entryOrName) {
+  const entry = typeof entryOrName === 'object'
+    ? entryOrName
+    : { name: String(entryOrName || ''), variantValue: String(entryOrName || '') };
   component.name = component.parent && component.parent.type === 'COMPONENT_SET'
-    ? formatVariantName(component.parent, resourceName)
-    : resourceName;
+    ? formatEntryVariantName(component.parent, entry)
+    : entry.name;
 }
 
 function normalizeComponentSetVariantNames(componentSet) {
   if (!componentSet || componentSet.removed || componentSet.type !== 'COMPONENT_SET') return 0;
-  const property = variantPropertyName(componentSet);
+  const setMeta = readMeta(componentSet) || {};
+  const property = sanitizeVariantToken(
+    setMeta.variantProperty || variantPropertyName(componentSet),
+    DEFAULT_VARIANT_PROPERTY
+  );
   let repaired = 0;
 
   for (const component of componentSet.children) {
     if (component.type !== 'COMPONENT') continue;
     const meta = readMeta(component) || {};
     const resourceName = componentResourceName(component, meta, meta.relativePath || '');
-    const nextName = `${property}=${sanitizeVariantToken(resourceName, 'Resource')}`;
+    const variantValue = meta.variantValue || resourceName;
+    const nextName = `${property}=${sanitizeVariantToken(variantValue, 'Resource')}`;
     if (component.name !== nextName) {
       component.name = nextName;
       repaired++;
@@ -574,8 +1185,40 @@ function normalizeComponentSetVariantNames(componentSet) {
   return repaired;
 }
 
-function repairSelectedComponentSetNames() {
+async function normalizeComponentSetVariantNamesInChunks(componentSet) {
+  if (!componentSet || componentSet.removed || componentSet.type !== 'COMPONENT_SET') return 0;
+  const setMeta = readMeta(componentSet) || {};
+  const property = sanitizeVariantToken(
+    setMeta.variantProperty || variantPropertyName(componentSet),
+    DEFAULT_VARIANT_PROPERTY
+  );
+  const components = componentSet.children.filter((component) => component.type === 'COMPONENT');
+  const yieldComponents = createMainThreadYielder();
+  let repaired = 0;
+
+  for (let index = 0; index < components.length; index++) {
+    const component = components[index];
+    const meta = readMeta(component) || {};
+    const resourceName = componentResourceName(component, meta, meta.relativePath || '');
+    const variantValue = meta.variantValue || resourceName;
+    const nextName = `${property}=${sanitizeVariantToken(variantValue, 'Resource')}`;
+    if (component.name !== nextName) {
+      component.name = nextName;
+      repaired++;
+    }
+    await yieldComponents(index + 1 < components.length, () => {
+      emitSyncProgress(componentSet.name || '', 'repair-names', {
+        completed: index + 1,
+        total: components.length
+      });
+    });
+  }
+  return repaired;
+}
+
+async function repairSelectedComponentSetNames() {
   const seen = new Set();
+  const componentSets = [];
   for (const [mapKey, componentSet] of activeSync.index.componentSets.entries()) {
     if (!componentSet || componentSet.removed || seen.has(componentSet.id)) continue;
     seen.add(componentSet.id);
@@ -584,7 +1227,19 @@ function repairSelectedComponentSetNames() {
     const indexedFolder = separator >= 0 ? mapKey.slice(0, separator) : '';
     const folderPath = normalizeFolderPath(meta.folderPath || indexedFolder);
     if (!activeSync.selectedFolders.has(folderPath)) continue;
-    normalizeComponentSetVariantNames(componentSet);
+    componentSets.push(componentSet);
+  }
+
+  const yieldSets = createMainThreadYielder();
+  for (let index = 0; index < componentSets.length; index++) {
+    const componentSet = componentSets[index];
+    await normalizeComponentSetVariantNamesInChunks(componentSet);
+    await yieldSets(index + 1 < componentSets.length, () => {
+      emitSyncProgress(componentSet.name || '', 'repair-names', {
+        completed: index + 1,
+        total: componentSets.length
+      });
+    });
   }
 }
 
@@ -733,9 +1388,7 @@ function scanLibrary(libraryId) {
     for (const child of section.children) {
       if (child.type === 'COMPONENT_SET') {
         const setMeta = readMeta(child);
-        const key = setMeta && setMeta.sizeKey
-          ? setMeta.sizeKey
-          : inferSetSizeKey(child);
+        const key = componentSetStorageKey(setMeta, child);
         if (key && !componentSets.has(groupKey(folderPath, key))) {
           componentSets.set(groupKey(folderPath, key), child);
         }
@@ -768,6 +1421,7 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
   const actions = [];
   const actionByPath = new Map();
   const expectedComponentSetGroups = buildExpectedComponentSetGroups(manifest);
+  const expectedEntryByPath = new Map(manifest.map((entry) => [entry.relativePath, entry]));
   const componentRecords = Array.isArray(index.componentRecords)
     ? index.componentRecords
     : Array.from(index.components.entries()).map(([relativePath, node]) => ({ relativePath, node }));
@@ -778,9 +1432,14 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
     const folderPath = classifySectionFolder(relativePath);
     const width = meta.width || node.width;
     const height = meta.height || node.height;
-    const expectsComponentSet = expectedComponentSetGroups.has(
-      groupKey(folderPath, sizeKey(width, height))
-    );
+    const expectedEntry = expectedEntryByPath.get(relativePath);
+    const expectedSetKey = expectedEntry ? componentSetKeyForEntry(expectedEntry) : null;
+    const expectsComponentSet = Boolean(expectedSetKey && expectedComponentSetGroups.has(
+      groupKey(folderPath, expectedSetKey)
+    ));
+    const currentSetKey = insideComponentSet
+      ? componentSetStorageKey(readMeta(node.parent), node.parent)
+      : null;
     return {
       relativePath,
       folderPath,
@@ -791,7 +1450,8 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
       width,
       height,
       needsStructureRepair: expectsComponentSet
-        ? (!insideComponentSet || node.name !== formatVariantName(node.parent, resourceName))
+        ? (!insideComponentSet || currentSetKey !== expectedSetKey ||
+          node.name !== formatEntryVariantName(node.parent, expectedEntry))
         : (insideComponentSet || node.name !== resourceName),
       managed: true,
       node
@@ -1163,7 +1823,7 @@ function updateExistingComponent(component, entry, imageHash, action) {
   }
 
   rectangle.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash }];
-  setManagedComponentName(component, entry.name);
+  setManagedComponentName(component, entry);
   rectangle.name = entry.name;
 
   const dimensionsChanged = !sameSize(oldWidth, oldHeight, entry.width, entry.height);
@@ -1171,6 +1831,8 @@ function updateExistingComponent(component, entry, imageHash, action) {
   const expectsComponentSet = shouldUseComponentSet(entry);
   const insideComponentSet = previousParent && previousParent.type === 'COMPONENT_SET';
   const containerChanged = expectsComponentSet !== Boolean(insideComponentSet);
+  const groupChanged = expectsComponentSet && insideComponentSet &&
+    componentSetStorageKey(readMeta(previousParent), previousParent) !== componentSetKeyForEntry(entry);
   if (dimensionsChanged) {
     component.resizeWithoutConstraints(entry.width, entry.height);
     rectangle.resizeWithoutConstraints(entry.width, entry.height);
@@ -1183,11 +1845,9 @@ function updateExistingComponent(component, entry, imageHash, action) {
     relativePath: entry.relativePath
   });
 
-  if (dimensionsChanged || folderChanged || (containerChanged && expectsComponentSet)) {
+  if (dimensionsChanged || folderChanged || groupChanged || containerChanged) {
     attachComponentToManagedGroup(component, entry);
     cleanupFormerContainer(previousParent);
-  } else if (containerChanged && insideComponentSet) {
-    markTouchedComponentSet(previousParent);
   } else if (action && action.layoutOnly) {
     markTouchedContainer(component.parent);
   }
@@ -1230,6 +1890,8 @@ function moveExistingComponent(action) {
   const expectsComponentSet = shouldUseComponentSet(action.entry);
   const insideComponentSet = previousParent && previousParent.type === 'COMPONENT_SET';
   const containerChanged = expectsComponentSet !== Boolean(insideComponentSet);
+  const groupChanged = expectsComponentSet && insideComponentSet &&
+    componentSetStorageKey(readMeta(previousParent), previousParent) !== componentSetKeyForEntry(action.entry);
   const dimensionsChanged = !sameSize(
     previousMeta.width || component.width,
     previousMeta.height || component.height,
@@ -1238,7 +1900,7 @@ function moveExistingComponent(action) {
   );
 
   activeSync.index.components.delete(normalizeRelativePath(previousMeta.relativePath));
-  setManagedComponentName(component, action.entry.name);
+  setManagedComponentName(component, action.entry);
   const rectangle = findImageRectangle(component);
   if (rectangle) rectangle.name = action.entry.name;
 
@@ -1249,11 +1911,9 @@ function moveExistingComponent(action) {
     relativePath: action.entry.relativePath
   });
 
-  if (folderChanged || dimensionsChanged || (containerChanged && expectsComponentSet)) {
+  if (folderChanged || dimensionsChanged || groupChanged || containerChanged) {
     attachComponentToManagedGroup(component, action.entry);
     cleanupFormerContainer(previousParent);
-  } else if (containerChanged && insideComponentSet) {
-    markTouchedComponentSet(previousParent);
   }
   if (action.layoutOnly) {
     const section = containingSection(component);
@@ -1281,21 +1941,21 @@ function deleteManagedComponent(action) {
   if (activeSync.index.components.get(action.relativePath) === component) {
     activeSync.index.components.delete(action.relativePath);
   }
-  component.remove();
+  safeRemoveNode(component);
   cleanupFormerContainer(parent);
 }
 
 function attachComponentToManagedGroup(component, entry) {
   const section = ensureManagedSection(entry.folderPath);
   activeSync.touchedSections.add(section);
-  const key = sizeKey(entry.width, entry.height);
+  const key = componentSetKeyForEntry(entry);
   const setMapKey = groupKey(entry.folderPath, key);
 
   if (!shouldUseComponentSet(entry)) {
     const parentChanged = component.parent !== section;
     if (parentChanged) {
       section.appendChild(component);
-      placeDirectChildWithoutMovingExisting(section, component);
+      stageDirectChildForFinalLayout(section, component);
     }
     component.name = entry.name;
     activeSync.touchedNodes.add(component);
@@ -1309,8 +1969,9 @@ function attachComponentToManagedGroup(component, entry) {
   }
 
   if (componentSet) {
-    component.name = formatVariantName(componentSet, entry.name);
+    component.name = formatEntryVariantName(componentSet, entry);
     componentSet.appendChild(component);
+    writeComponentSetClassificationMeta(componentSet, entry);
     markTouchedComponentSet(componentSet);
     activeSync.touchedNodes.add(componentSet);
     return;
@@ -1320,22 +1981,26 @@ function attachComponentToManagedGroup(component, entry) {
   if (standalone) {
     const anchorX = standalone.x;
     const anchorY = standalone.y;
+    const standaloneMeta = readMeta(standalone) || {};
+    standalone.name = `${sanitizeVariantToken(
+      standaloneMeta.variantProperty || entry.variantProperty,
+      DEFAULT_VARIANT_PROPERTY
+    )}=${sanitizeVariantToken(standaloneMeta.variantValue || componentResourceName(
+      standalone,
+      standaloneMeta,
+      standaloneMeta.relativePath || ''
+    ), 'Resource')}`;
+    component.name = formatEntryVariantName(null, entry);
     section.appendChild(component);
     const componentSetNode = figma.combineAsVariants([standalone, component], section);
-    componentSetNode.name = key;
+    componentSetNode.name = entry.componentSetName || key;
     componentSetNode.x = anchorX - VARIANT_PADDING;
     componentSetNode.y = anchorY - VARIANT_PADDING;
     standalone.x = VARIANT_PADDING;
     standalone.y = VARIANT_PADDING;
     component.x = VARIANT_PADDING;
     component.y = VARIANT_PADDING;
-    writeMeta(componentSetNode, {
-      role: 'component-set',
-      libraryId: activeSync.libraryId,
-      rootName: activeSync.rootName,
-      folderPath: entry.folderPath,
-      sizeKey: key
-    });
+    writeComponentSetClassificationMeta(componentSetNode, entry);
     normalizeComponentSetVariantNames(componentSetNode);
     activeSync.index.componentSets.set(setMapKey, componentSetNode);
     markTouchedComponentSet(componentSetNode);
@@ -1344,7 +2009,7 @@ function attachComponentToManagedGroup(component, entry) {
   }
 
   section.appendChild(component);
-  placeDirectChildWithoutMovingExisting(section, component);
+  stageDirectChildForFinalLayout(section, component);
   component.name = entry.name;
   activeSync.touchedNodes.add(component);
 }
@@ -1356,7 +2021,8 @@ function ensureManagedSection(folderPath) {
   section = figma.createSection();
   section.name = folderDisplayName(folderPath);
   section.resizeWithoutConstraints(360, 320);
-  placeNewSection(section);
+  section.x = 0;
+  section.y = 0;
   figma.currentPage.appendChild(section);
   writeMeta(section, {
     role: 'section',
@@ -1376,7 +2042,7 @@ function findStandaloneComponent(section, key, excluded) {
     if (child === excluded || child.type !== 'COMPONENT') return false;
     const meta = readMeta(child);
     if (!meta || meta.role !== 'component' || meta.libraryId !== activeSync.libraryId) return false;
-    return sizeKey(meta.width || child.width, meta.height || child.height) === key;
+    return componentStorageKey(meta, child) === key;
   }) || null;
 }
 
@@ -1489,32 +2155,13 @@ function wouldOverlapSectionSiblings(node, projectedWidth, projectedHeight) {
   );
 }
 
-function placeDirectChildWithoutMovingExisting(section, node) {
-  const siblings = section.children.filter((child) => child !== node);
-  const candidates = [{ x: SECTION_PADDING, y: SECTION_CONTENT_TOP }];
-
-  for (const sibling of siblings) {
-    candidates.push(
-      { x: sibling.x + sibling.width + ITEM_GAP, y: sibling.y },
-      { x: sibling.x, y: sibling.y + sibling.height + ITEM_GAP }
-    );
-  }
-
-  candidates.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-  const selected = candidates.find((candidate) => {
-    const rect = { x: candidate.x, y: candidate.y, width: node.width, height: node.height };
-    const withinRow = candidate.x + node.width <= MAX_SECTION_ROW_WIDTH;
-    return withinRow && !siblings.some((sibling) => rectanglesOverlap(rect, nodeRect(sibling), ITEM_GAP / 2));
-  });
-
-  if (selected) {
-    node.x = selected.x;
-    node.y = selected.y;
-    return;
-  }
-
+function stageDirectChildForFinalLayout(section, node) {
+  // Direct children may overlap briefly while a batch is being imported. Their
+  // only meaningful position is assigned once by relayoutManagedSection(). This
+  // avoids an increasingly expensive empty-slot search for every standalone item.
   node.x = SECTION_PADDING;
-  node.y = siblings.reduce((max, sibling) => Math.max(max, sibling.y + sibling.height), SECTION_CONTENT_TOP) + ITEM_GAP;
+  node.y = SECTION_CONTENT_TOP;
+  activeSync.touchedSections.add(section);
 }
 
 function placeNewSection(section) {
@@ -1559,16 +2206,20 @@ function cleanupFormerContainer(parent) {
   if (parent.type === 'COMPONENT_SET' && parent.children.length === 0) {
     const meta = readMeta(parent);
     if (meta && activeSync) {
-      activeSync.index.componentSets.delete(groupKey(normalizeFolderPath(meta.folderPath), meta.sizeKey));
+      activeSync.index.componentSets.delete(groupKey(
+        normalizeFolderPath(meta.folderPath),
+        componentSetStorageKey(meta, parent)
+      ));
     }
-    parent.remove();
-  } else if (parent.type === 'SECTION') {
-    expandSectionToFit(parent);
+    safeRemoveNode(parent);
   }
 }
 
-function cleanupTouchedSections() {
-  for (const section of activeSync.touchedSections) {
+async function cleanupTouchedSections() {
+  const sections = Array.from(activeSync.touchedSections);
+  const yieldSections = createMainThreadYielder();
+  for (let index = 0; index < sections.length; index++) {
+    const section = sections[index];
     if (!section) continue;
     const meta = readMeta(section) || {};
     const folderPath = normalizeFolderPath(meta.folderPath);
@@ -1577,11 +2228,17 @@ function cleanupTouchedSections() {
       continue;
     }
     if (section.children.length === 0 && meta.role === 'section' && meta.libraryId === activeSync.libraryId) {
-      section.remove();
+      safeRemoveNode(section);
       activeSync.index.sections.delete(folderPath);
       continue;
     }
-    relayoutManagedSection(section);
+    await relayoutManagedSection(section);
+    await yieldSections(index + 1 < sections.length, () => {
+      emitSyncProgress(section.name || '', 'sections', {
+        completed: index + 1,
+        total: sections.length
+      });
+    });
   }
 }
 
@@ -1597,8 +2254,11 @@ function markTouchedContainer(node) {
   else rememberTouchedSection(node);
 }
 
-function dissolveSingletonComponentSets() {
-  for (const componentSet of Array.from(activeSync.touchedComponentSets)) {
+async function dissolveSingletonComponentSets() {
+  const componentSets = Array.from(activeSync.touchedComponentSets);
+  const yieldSets = createMainThreadYielder();
+  for (let index = 0; index < componentSets.length; index++) {
+    const componentSet = componentSets[index];
     if (!componentSet || componentSet.removed || componentSet.type !== 'COMPONENT_SET') continue;
     const components = componentSet.children.filter((child) =>
       child.type === 'COMPONENT' && !child.removed
@@ -1614,7 +2274,7 @@ function dissolveSingletonComponentSets() {
     const absoluteY = componentSet.y + component.y;
     const setMapKey = groupKey(
       normalizeFolderPath(setMeta.folderPath || componentMeta.folderPath),
-      setMeta.sizeKey || sizeKey(component.width, component.height)
+      componentSetStorageKey(setMeta, componentSet)
     );
 
     section.appendChild(component);
@@ -1632,19 +2292,31 @@ function dissolveSingletonComponentSets() {
     activeSync.touchedNodes.delete(componentSet);
     activeSync.touchedNodes.add(component);
     activeSync.touchedSections.add(section);
-    componentSet.remove();
+    // Moving the last child out can make Figma auto-delete the empty container.
+    // safeRemoveNode keeps this cleanup idempotent in that case.
+    safeRemoveNode(componentSet);
+    await yieldSets(index + 1 < componentSets.length);
   }
 }
 
-function compactTouchedComponentSets() {
-  for (const componentSet of activeSync.touchedComponentSets) {
+async function compactTouchedComponentSets() {
+  const componentSets = Array.from(activeSync.touchedComponentSets);
+  const yieldSets = createMainThreadYielder();
+  for (let index = 0; index < componentSets.length; index++) {
+    const componentSet = componentSets[index];
     if (!componentSet || componentSet.removed || componentSet.children.length === 0) continue;
-    relayoutComponentSet(componentSet);
+    await relayoutComponentSet(componentSet);
+    await yieldSets(index + 1 < componentSets.length, () => {
+      emitSyncProgress(componentSet.name || '', 'component-sets', {
+        completed: index + 1,
+        total: componentSets.length
+      });
+    });
   }
   activeSync.variantLayoutCache = new Map();
 }
 
-function relayoutComponentSet(componentSet) {
+async function relayoutComponentSet(componentSet) {
   const children = componentSet.children
     .filter((child) => !child.removed)
     .slice()
@@ -1654,9 +2326,11 @@ function relayoutComponentSet(componentSet) {
   applyComponentSetStroke(componentSet);
 
   const layout = createNearSquareGrid(children, VARIANT_GAP);
+  const yieldVariants = createMainThreadYielder();
   for (let index = 0; index < children.length; index++) {
     children[index].x = VARIANT_PADDING + layout.positions[index].x;
     children[index].y = VARIANT_PADDING + layout.positions[index].y;
+    await yieldVariants(index + 1 < children.length);
   }
   componentSet.resizeWithoutConstraints(
     Math.max(1, layout.width + VARIANT_PADDING * 2),
@@ -1678,7 +2352,7 @@ function compareVariantLayoutOrder(a, b) {
   return (aOrder - bOrder) || String(a.name || '').localeCompare(String(b.name || ''));
 }
 
-function relayoutManagedSection(section) {
+async function relayoutManagedSection(section) {
   if (!section || section.removed || section.type !== 'SECTION') return;
   const managedNodes = [];
   const manualNodes = [];
@@ -1692,9 +2366,16 @@ function relayoutManagedSection(section) {
     managedNodes.sort(compareSectionLayoutOrder);
     const layout = createCompactPacking(managedNodes, ITEM_GAP);
     const origin = chooseSectionLayoutOrigin(layout, manualNodes);
+    const yieldNodes = createMainThreadYielder();
     for (let index = 0; index < managedNodes.length; index++) {
       managedNodes[index].x = origin.x + layout.positions[index].x;
       managedNodes[index].y = origin.y + layout.positions[index].y;
+      await yieldNodes(index + 1 < managedNodes.length, () => {
+        emitSyncProgress(section.name || '', 'section-layout', {
+          completed: index + 1,
+          total: managedNodes.length
+        });
+      });
     }
   }
 
@@ -1919,7 +2600,7 @@ function containingSection(node) {
   return current && current.type === 'SECTION' ? current : null;
 }
 
-function layoutMovableSections() {
+async function layoutMovableSections() {
   const candidates = new Map();
   for (const section of activeSync.newSections) candidates.set(section.id, section);
   for (const section of activeSync.repairSections) candidates.set(section.id, section);
@@ -1942,9 +2623,53 @@ function layoutMovableSections() {
         y: fixedSections.reduce((max, section) => Math.max(max, section.y + section.height), 0) + SECTION_GAP
       };
 
+  const yieldSections = createMainThreadYielder();
   for (let index = 0; index < sections.length; index++) {
     sections[index].x = origin.x + layout.positions[index].x;
     sections[index].y = origin.y + layout.positions[index].y;
+    await yieldSections(index + 1 < sections.length);
+  }
+}
+
+function createMainThreadYielder(maxItems, maxMilliseconds) {
+  const itemLimit = Math.max(1, Number(maxItems) || MAIN_THREAD_YIELD_ITEMS);
+  const timeLimit = Math.max(1, Number(maxMilliseconds) || MAIN_THREAD_YIELD_MS);
+  let itemsSinceYield = 0;
+  let lastYieldAt = Date.now();
+
+  return async function checkpoint(hasMoreWork, beforeYield) {
+    itemsSinceYield++;
+    if (!hasMoreWork ||
+        (itemsSinceYield < itemLimit && Date.now() - lastYieldAt < timeLimit)) return false;
+    if (beforeYield) beforeYield();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    itemsSinceYield = 0;
+    lastYieldAt = Date.now();
+    return true;
+  };
+}
+
+function safeRemoveNode(node) {
+  if (!node) return false;
+  try {
+    if (node.removed) return false;
+    node.remove();
+    return true;
+  } catch (error) {
+    // Figma may auto-delete an empty structural node while its last child is
+    // being reparented. Multiplayer edits can also remove a stored node between
+    // the defensive check above and remove(). Both cases already reached the
+    // requested end state, so they are safe to treat as an idempotent delete.
+    try {
+      if (node.removed) return false;
+    } catch (_) {
+      // Some stale node proxies throw even when reading `removed`.
+    }
+    const message = formatError(error);
+    if (/node with id .* does not exist|node .* does not exist|has been removed/i.test(message)) {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -1996,7 +2721,13 @@ function writeComponentMeta(component, entry, libraryId, hash) {
     height: entry.height,
     sourceSize: entry.sourceSize,
     lastModified: entry.lastModified,
-    layoutOrder: entry.layoutOrder
+    layoutOrder: entry.layoutOrder,
+    componentSetKey: entry.componentSetKey || null,
+    componentSetName: entry.componentSetName || '',
+    variantProperty: entry.variantProperty || DEFAULT_VARIANT_PROPERTY,
+    variantValue: entry.variantValue || entry.name,
+    classificationSource: entry.classificationSource || 'strict',
+    classificationConfidence: Number(entry.classificationConfidence) || 0
   });
 }
 
@@ -2024,6 +2755,38 @@ function inferSetSizeKey(componentSet) {
   return first ? sizeKey(first.width, first.height) : '';
 }
 
+function componentSetKeyForEntry(entry) {
+  return entry && entry.componentSetKey ? String(entry.componentSetKey) : null;
+}
+
+function componentStorageKey(meta, component) {
+  if (meta && meta.componentSetKey) return String(meta.componentSetKey);
+  return sizeKey((meta && meta.width) || component.width, (meta && meta.height) || component.height);
+}
+
+function componentSetStorageKey(meta, componentSet) {
+  if (meta && meta.componentSetKey) return String(meta.componentSetKey);
+  if (meta && meta.sizeKey) return String(meta.sizeKey);
+  return inferSetSizeKey(componentSet);
+}
+
+function writeComponentSetClassificationMeta(componentSet, entry) {
+  const key = componentSetKeyForEntry(entry);
+  writeMeta(componentSet, {
+    role: 'component-set',
+    libraryId: activeSync.libraryId,
+    rootName: activeSync.rootName,
+    folderPath: entry.folderPath,
+    componentSetKey: key,
+    componentSetName: entry.componentSetName || key,
+    variantProperty: entry.variantProperty || DEFAULT_VARIANT_PROPERTY,
+    classificationSource: entry.classificationSource || 'strict',
+    classificationConfidence: Number(entry.classificationConfidence) || 0,
+    sizeKey: entry.classificationSource === 'strict' ? key : null
+  });
+  componentSet.name = entry.componentSetName || key;
+}
+
 function sizeKey(width, height) {
   return `${Math.round(width)}x${Math.round(height)}`;
 }
@@ -2031,7 +2794,9 @@ function sizeKey(width, height) {
 function buildExpectedComponentSetGroups(manifest) {
   const counts = new Map();
   for (const entry of manifest) {
-    const key = groupKey(entry.folderPath, sizeKey(entry.width, entry.height));
+    const componentSetKey = componentSetKeyForEntry(entry);
+    if (!componentSetKey) continue;
+    const key = groupKey(entry.folderPath, componentSetKey);
     counts.set(key, (counts.get(key) || 0) + 1);
   }
   return new Set(
@@ -2042,10 +2807,9 @@ function buildExpectedComponentSetGroups(manifest) {
 }
 
 function shouldUseComponentSet(entry) {
-  return Boolean(activeSync && activeSync.expectedComponentSetGroups &&
-    activeSync.expectedComponentSetGroups.has(
-      groupKey(entry.folderPath, sizeKey(entry.width, entry.height))
-    ));
+  const componentSetKey = componentSetKeyForEntry(entry);
+  return Boolean(componentSetKey && activeSync && activeSync.expectedComponentSetGroups &&
+    activeSync.expectedComponentSetGroups.has(groupKey(entry.folderPath, componentSetKey)));
 }
 
 function groupKey(folderPath, key) {

@@ -946,6 +946,39 @@ test('large component sets allocate unique slots within a bounded time', async (
   assert.ok(rescanElapsedMs < 2500, `large layout audit took ${rescanElapsedMs}ms`);
 });
 
+test('large smart-classified standalone imports avoid per-item placement searches', async () => {
+  const runtime = createRuntime();
+  const manifest = Array.from({ length: 3800 }, (_, index) => {
+    const name = `resource-${String(index).padStart(4, '0')}`;
+    return asset(`icons/${name}.png`, 'icons', name, `h-${index}`, 24, 24);
+  });
+
+  const startedAt = Date.now();
+  const prepared = await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'smart'
+  });
+  assert.equal(prepared.classification.standaloneAssets, manifest.length);
+  await runtime.send('begin-sync', { selectedFolders: ['icons'], deleteMissing: true });
+  for (let index = 0; index < manifest.length; index += 48) {
+    await runtime.send('apply-batch', {
+      files: manifest.slice(index, index + 48).map((entry) => ({
+        relativePath: entry.relativePath,
+        bytes: new Uint8Array([1, 2, 3]).buffer
+      }))
+    });
+  }
+  await runtime.send('finish-sync', {});
+  const elapsedMs = Date.now() - startedAt;
+  const section = runtime.section('icons');
+  const positions = section.children.map((node) => `${node.x},${node.y}`);
+
+  assert.equal(section.children.length, manifest.length);
+  assert.equal(new Set(positions).size, manifest.length);
+  assert.ok(elapsedMs < 2500, `large standalone import took ${elapsedMs}ms`);
+});
+
 test('invalid image bytes are skipped and the sync still finishes', async () => {
   const runtime = createRuntime();
   const manifest = [asset('icons/broken.png', 'icons', 'broken', 'h-broken', 24, 24)];
@@ -983,6 +1016,317 @@ test('deletions are cancelled when another file fails during the same sync', asy
   assert.ok(runtime.component('icons/search.png'));
   assert.ok(finish.warnings.some((warning) => warning.includes('取消')));
 });
+
+test('smart classification groups semantic glyph families with mixed widths and leaves unrelated same-size assets standalone', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/zhandouli_1_0.png', 'common', 'zhandouli_1_0', 'h-0', 20, 25),
+    asset('common/zhandouli_1_1.png', 'common', 'zhandouli_1_1', 'h-1', 13, 25),
+    asset('common/zhandouli_1_2.png', 'common', 'zhandouli_1_2', 'h-2', 21, 25),
+    asset('common/common_box_alpha.png', 'common', 'common_box_alpha', 'h-box', 40, 40),
+    asset('common/common_icon_beta.png', 'common', 'common_icon_beta', 'h-icon', 40, 40)
+  ];
+
+  const prepared = await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'smart'
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(prepared.classification)), {
+    mode: 'smart',
+    groups: 1,
+    groupedAssets: 3,
+    standaloneAssets: 2,
+    aiGroups: 0
+  });
+
+  await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
+  for (const entry of manifest) await runtime.apply(entry.relativePath, entry.width, entry.height);
+  await runtime.send('finish-sync', {});
+
+  const section = runtime.section('common');
+  const sets = section.children.filter((node) => node.type === 'COMPONENT_SET');
+  assert.equal(sets.length, 1);
+  assert.equal(sets[0].name, 'zhandouli/1');
+  assert.deepEqual(sets[0].children.map((node) => node.name).sort(), ['Glyph=0', 'Glyph=1', 'Glyph=2']);
+  assert.equal(section.children.filter((node) => node.type === 'COMPONENT').length, 2);
+});
+
+test('strict, smart, and AI modes defer standalone placement and converge to the same final layout', async () => {
+  const modes = ['strict', 'smart', 'ai'];
+  const finalLayouts = [];
+
+  for (const mode of modes) {
+    const runtime = createRuntime();
+    const manifest = Array.from({ length: 120 }, (_, index) => {
+      const name = `resource-${String(index).padStart(3, '0')}`;
+      return asset(`common/${name}.png`, 'common', name, `h-${index}`, 16 + index, 24);
+    });
+    const prepared = await runtime.send('prepare-sync', {
+      rootName: 'library',
+      manifest,
+      classificationMode: mode
+    });
+    if (mode === 'strict') assert.equal(prepared.classification.groups, manifest.length);
+    else assert.equal(prepared.classification.standaloneAssets, manifest.length);
+
+    await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
+    await runtime.send('apply-batch', {
+      files: manifest.map((entry) => ({
+        relativePath: entry.relativePath,
+        bytes: new Uint8Array([1, 2, 3]).buffer
+      }))
+    });
+
+    const sectionBeforeFinish = runtime.section('common');
+    assert.ok(sectionBeforeFinish.children.every((node) => node.x === 192 && node.y === 272));
+    await runtime.send('finish-sync', {});
+
+    const section = runtime.section('common');
+    assertNoOverlap(section.children, 100);
+    finalLayouts.push(section.children
+      .map((node) => ({ name: node.name, x: node.x, y: node.y, width: node.width, height: node.height }))
+      .sort((a, b) => a.name.localeCompare(b.name)));
+
+    const rescan = await runtime.send('prepare-sync', {
+      rootName: 'library',
+      manifest,
+      classificationMode: mode
+    });
+    assert.equal(rescan.summary.move, 0);
+    assert.equal(rescan.summary.unchanged, manifest.length);
+  }
+
+  assert.deepEqual(finalLayouts[1], finalLayouts[0]);
+  assert.deepEqual(finalLayouts[2], finalLayouts[0]);
+});
+
+test('switching an existing strict-size library to smart classification preserves component ids while regrouping', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/zhandouli_1_0.png', 'common', 'zhandouli_1_0', 'h-0', 20, 25),
+    asset('common/zhandouli_1_1.png', 'common', 'zhandouli_1_1', 'h-1', 13, 25),
+    asset('common/zhandouli_1_2.png', 'common', 'zhandouli_1_2', 'h-2', 21, 25),
+    asset('common/common_box_alpha.png', 'common', 'common_box_alpha', 'h-box', 40, 40),
+    asset('common/common_icon_beta.png', 'common', 'common_icon_beta', 'h-icon', 40, 40)
+  ];
+  await importAll(runtime, manifest);
+  const idsBefore = new Map(runtime.componentSnapshot().map((item) => [item.path, item.id]));
+
+  const prepared = await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'smart'
+  });
+  assert.equal(prepared.summary.move, 5);
+  const begin = await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
+  assert.equal(begin.fileActions.length, 0);
+  await runtime.send('finish-sync', {});
+
+  for (const item of runtime.componentSnapshot()) {
+    assert.equal(item.id, idsBefore.get(item.path));
+  }
+  const section = runtime.section('common');
+  const sets = section.children.filter((node) => node.type === 'COMPONENT_SET');
+  assert.equal(sets.length, 1);
+  assert.equal(sets[0].name, 'zhandouli/1');
+  assert.equal(section.children.filter((node) => node.type === 'COMPONENT').length, 2);
+});
+
+test('MCP classification request round-trips through shared plugin data and applies an approved AI plan', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/close_primary.png', 'common', 'close_primary', 'h-primary', 45, 49),
+    asset('common/close_compact.png', 'common', 'close_compact', 'h-compact', 44, 48)
+  ];
+  const prepared = await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  assert.equal(prepared.classification.groups, 0);
+
+  const published = await runtime.send('publish-classification-request', { selectedFolders: ['common'] });
+  assert.equal(published.assetCount, 2);
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+  assert.equal(request.requestId, published.requestId);
+  assert.equal(request.assets.length, 2);
+
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+      schemaVersion: 1,
+      requestId: published.requestId,
+      groups: [{
+        id: 'close-control',
+        name: 'Controls/Close',
+        confidence: 0.96,
+        variantProperty: 'Size',
+        members: [
+          { relativePath: 'common/close_primary.png', variantValue: 'Primary' },
+          { relativePath: 'common/close_compact.png', variantValue: 'Compact' }
+        ]
+      }],
+      standalone: []
+    }, 40);
+  const loaded = await runtime.send('load-classification-plan', {});
+  assert.equal(loaded.classification.aiGroups, 1);
+  assert.equal(loaded.classification.groupedAssets, 2);
+
+  await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
+  for (const entry of manifest) await runtime.apply(entry.relativePath, entry.width, entry.height);
+  await runtime.send('finish-sync', {});
+
+  const componentSet = runtime.section('common').children.find((node) => node.type === 'COMPONENT_SET');
+  assert.ok(componentSet);
+  assert.equal(componentSet.name, 'Controls/Close');
+  assert.deepEqual(componentSet.children.map((node) => node.name).sort(), ['Size=Compact', 'Size=Primary']);
+});
+
+test('AI classification plans reject duplicate membership before touching the canvas', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/a.png', 'common', 'a', 'h-a', 20, 20),
+    asset('common/b.png', 'common', 'b', 'h-b', 20, 20),
+    asset('common/c.png', 'common', 'c', 'h-c', 20, 20)
+  ];
+  await runtime.send('prepare-sync', { rootName: 'library', manifest, classificationMode: 'ai' });
+  const published = await runtime.send('publish-classification-request', { selectedFolders: ['common'] });
+  runtime.figma.currentPage.setSharedPluginData(
+    'figma_image_importer',
+    'classification-plan',
+    JSON.stringify({
+      schemaVersion: 1,
+      requestId: published.requestId,
+      groups: [
+        { id: 'one', name: 'One', confidence: 0.95, members: ['common/a.png', 'common/b.png'] },
+        { id: 'two', name: 'Two', confidence: 0.95, members: ['common/a.png', 'common/c.png'] }
+      ],
+      standalone: []
+    })
+  );
+
+  await assert.rejects(
+    () => runtime.send('load-classification-plan', {}),
+    /重复分配资源/
+  );
+  assert.equal(runtime.section('common'), null);
+});
+
+test('AI classification plans reject unknown resources before touching the canvas', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/a.png', 'common', 'a', 'h-a', 20, 20),
+    asset('common/b.png', 'common', 'b', 'h-b', 20, 20)
+  ];
+  await runtime.send('prepare-sync', { rootName: 'library', manifest, classificationMode: 'ai' });
+  const published = await runtime.send('publish-classification-request', { selectedFolders: ['common'] });
+  runtime.figma.currentPage.setSharedPluginData(
+    'figma_image_importer',
+    'classification-plan',
+    JSON.stringify({
+      schemaVersion: 1,
+      requestId: published.requestId,
+      groups: [{
+        id: 'unknown-member',
+        name: 'Unknown',
+        confidence: 0.95,
+        members: ['common/a.png', 'common/missing.png']
+      }],
+      standalone: []
+    })
+  );
+
+  await assert.rejects(
+    () => runtime.send('load-classification-plan', {}),
+    /不存在的资源/
+  );
+  assert.equal(runtime.section('common'), null);
+});
+
+test('large MCP classification requests stay below the shared plugin data entry limit', async () => {
+  const runtime = createRuntime();
+  const manifest = Array.from({ length: 1400 }, (_, index) => {
+    const suffix = String(index).padStart(4, '0');
+    const name = `very_long_component_resource_name_for_chunk_transport_${suffix}`;
+    return asset(`common/${name}.png`, 'common', name, `hash-${suffix}`, 24, 24);
+  });
+  await runtime.send('prepare-sync', { rootName: 'library', manifest, classificationMode: 'ai' });
+  const published = await runtime.send('publish-classification-request', { selectedFolders: ['common'] });
+
+  assert.ok(published.requestChunks > 1);
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+  assert.equal(request.assets.length, manifest.length);
+  for (const value of runtime.figma.currentPage._sharedPluginData.values()) {
+    assert.ok(Buffer.byteLength(value, 'utf8') <= 100000);
+  }
+});
+
+test('MCP classification requests include only selected folders and reject out-of-scope plans', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/control_0.png', 'common', 'control_0', 'h-c0', 20, 20),
+    asset('common/control_1.png', 'common', 'control_1', 'h-c1', 21, 20),
+    asset('icons/action_0.png', 'icons', 'action_0', 'h-i0', 24, 24),
+    asset('icons/action_1.png', 'icons', 'action_1', 'h-i1', 24, 24)
+  ];
+  await runtime.send('prepare-sync', { rootName: 'library', manifest, classificationMode: 'ai' });
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+
+  assert.equal(published.folderCount, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(request.selectedFolders)), ['common']);
+  assert.equal(request.assets.length, 2);
+  assert.ok(request.assets.every((entry) => entry.folderPath === 'common'));
+  assert.ok(request.smartGroups.every((group) => group.folderPath === 'common'));
+
+  runtime.figma.currentPage.setSharedPluginData(
+    'figma_image_importer',
+    'classification-plan',
+    JSON.stringify({
+      schemaVersion: 1,
+      requestId: published.requestId,
+      groups: [{
+        id: 'outside-scope',
+        confidence: 0.95,
+        members: ['common/control_0.png', 'icons/action_0.png']
+      }],
+      standalone: []
+    })
+  );
+  await assert.rejects(
+    () => runtime.send('load-classification-plan', {}),
+    /未选中文件夹/
+  );
+});
+
+function readSharedJson(page, baseKey) {
+  const raw = page.getSharedPluginData('figma_image_importer', baseKey);
+  const parsed = JSON.parse(raw);
+  if (parsed.encoding !== 'chunked-json') return parsed;
+  return JSON.parse(parsed.chunkKeys.map((key) =>
+    page.getSharedPluginData('figma_image_importer', key)
+  ).join(''));
+}
+
+function writeSharedJson(page, baseKey, value, chunkSize = 20000) {
+  const serialized = JSON.stringify(value);
+  const chunks = [];
+  for (let offset = 0; offset < serialized.length; offset += chunkSize) {
+    chunks.push(serialized.slice(offset, offset + chunkSize));
+  }
+  const chunkKeys = chunks.map((_, index) => `${baseKey}_${index}`);
+  chunks.forEach((chunk, index) => {
+    page.setSharedPluginData('figma_image_importer', chunkKeys[index], chunk);
+  });
+  page.setSharedPluginData('figma_image_importer', baseKey, JSON.stringify({
+    encoding: 'chunked-json',
+    chunkCount: chunks.length,
+    chunkKeys,
+    schemaVersion: 1,
+    requestId: value.requestId
+  }));
+}
 
 async function importAll(runtime, manifest) {
   await runtime.send('prepare-sync', { rootName: 'library', manifest });
@@ -1069,14 +1413,17 @@ function createRuntime() {
       this.removed = false;
       this.fills = [];
       this._pluginData = new Map();
+      this._sharedPluginData = new Map();
     }
 
     appendChild(child) {
-      if (child.parent) {
-        child.parent.children = child.parent.children.filter((item) => item !== child);
+      const previousParent = child.parent;
+      if (previousParent) {
+        previousParent.children = previousParent.children.filter((item) => item !== child);
       }
       child.parent = this;
       if (!this.children.includes(child)) this.children.push(child);
+      autoRemoveEmptyComponentSet(previousParent);
     }
 
     resize(width, height) {
@@ -1097,14 +1444,40 @@ function createRuntime() {
       else this._pluginData.set(key, value);
     }
 
+    getSharedPluginData(namespace, key) {
+      return this._sharedPluginData.get(`${namespace}\u0000${key}`) || '';
+    }
+
+    setSharedPluginData(namespace, key, value) {
+      if (!/^[a-zA-Z0-9_.]+$/.test(namespace)) {
+        throw new Error('invalid shared plugin data namespace');
+      }
+      if (Buffer.byteLength(String(value), 'utf8') > 100000) {
+        throw new Error('shared plugin data entry exceeds 100 kB');
+      }
+      const mapKey = `${namespace}\u0000${key}`;
+      if (value === '') this._sharedPluginData.delete(mapKey);
+      else this._sharedPluginData.set(mapKey, value);
+    }
+
     remove() {
-      if (this.parent) {
-        this.parent.children = this.parent.children.filter((item) => item !== this);
+      if (this.removed) throw new Error(`in remove: The node with id "${this.id}" does not exist`);
+      const previousParent = this.parent;
+      if (previousParent) {
+        previousParent.children = previousParent.children.filter((item) => item !== this);
       }
       this.parent = null;
       this.removed = true;
       for (const child of this.children) child.removed = true;
+      autoRemoveEmptyComponentSet(previousParent);
     }
+  }
+
+  function autoRemoveEmptyComponentSet(node) {
+    if (!node || node.removed || node.type !== 'COMPONENT_SET' || node.children.length !== 0) return;
+    if (node.parent) node.parent.children = node.parent.children.filter((item) => item !== node);
+    node.parent = null;
+    node.removed = true;
   }
 
   const page = new MockNode('PAGE');
@@ -1117,6 +1490,7 @@ function createRuntime() {
   }
 
   const figma = {
+    fileKey: 'test-file-key',
     currentPage: page,
     ui: {
       onmessage: null,
@@ -1165,7 +1539,8 @@ function createRuntime() {
     String,
     Number,
     Object,
-    Error
+    Error,
+    setTimeout
   });
 
   async function send(type, payload) {

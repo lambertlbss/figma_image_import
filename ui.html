@@ -39,7 +39,7 @@
       font-size: 12px;
     }
 
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
 
     button {
       border: 0;
@@ -52,7 +52,7 @@
     }
 
     .app {
-      height: 620px;
+      height: 720px;
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -294,6 +294,70 @@
     .metric.delete strong { color: var(--red); }
     .metric.move strong { color: var(--purple); }
 
+    .classification-card {
+      margin-top: 9px;
+      padding: 10px;
+      background: #f7f5ff;
+      border: 1px solid #cfc4ec;
+      border-radius: 7px;
+    }
+
+    .classification-topline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .classification-title {
+      font-weight: 700;
+    }
+
+    .classification-card select {
+      min-width: 126px;
+      padding: 5px 7px;
+      color: #2e2446;
+      background: #fff;
+      border: 1px solid #b9abd8;
+      border-radius: 5px;
+      font-size: 10px;
+    }
+
+    .classification-summary {
+      margin-top: 6px;
+      color: #665b78;
+      font-size: 9px;
+      line-height: 1.4;
+    }
+
+    .ai-actions {
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .ai-action-button {
+      min-height: 30px;
+      padding: 5px 7px;
+      color: #4d327d;
+      background: #fff;
+      border: 1px solid #b9abd8;
+      border-radius: 5px;
+      font-size: 9px;
+      font-weight: 650;
+    }
+
+    .ai-action-button:not(:disabled):hover { background: #f0ebff; }
+
+    .ai-status {
+      display: none;
+      grid-column: 1 / -1;
+      color: #665b78;
+      font-size: 9px;
+      line-height: 1.4;
+    }
+
     .section-heading {
       display: flex;
       align-items: center;
@@ -508,6 +572,23 @@
           <div class="metric"><strong id="countUnchanged">0</strong><span>未变化</span></div>
         </div>
 
+        <div class="classification-card">
+          <div class="classification-topline">
+            <span class="classification-title">组件集分类</span>
+            <select id="classificationMode" aria-label="组件集分类方式">
+              <option value="strict">严格尺寸</option>
+              <option value="smart" selected>智能规则</option>
+              <option value="ai">AI 辅助（MCP）</option>
+            </select>
+          </div>
+          <div id="classificationSummary" class="classification-summary">扫描后显示分类结果。</div>
+          <div id="aiActions" class="ai-actions">
+            <button id="publishAiRequest" class="ai-action-button" type="button">生成 MCP 请求</button>
+            <button id="loadAiPlan" class="ai-action-button" type="button">读取 AI 方案</button>
+            <div id="aiStatus" class="ai-status"></div>
+          </div>
+        </div>
+
         <div class="section-heading">
           <span>Folder classification</span>
           <div class="section-heading-actions">
@@ -550,6 +631,12 @@
     const deleteOption = document.getElementById('deleteOption');
     const deleteMissing = document.getElementById('deleteMissing');
     const conflictNote = document.getElementById('conflictNote');
+    const classificationMode = document.getElementById('classificationMode');
+    const classificationSummary = document.getElementById('classificationSummary');
+    const aiActions = document.getElementById('aiActions');
+    const publishAiRequest = document.getElementById('publishAiRequest');
+    const loadAiPlan = document.getElementById('loadAiPlan');
+    const aiStatus = document.getElementById('aiStatus');
 
     const counters = {
       add: document.getElementById('countAdd'),
@@ -562,6 +649,8 @@
     let requestSequence = 0;
     const pendingRequests = new Map();
     let currentPlan = null;
+    let currentManifest = [];
+    let currentRootName = '';
     let fileByPath = new Map();
     let selectedFolders = new Set();
     let isBusy = false;
@@ -615,6 +704,9 @@
     syncButton.addEventListener('click', () => startSync());
     toggleAllFolders.addEventListener('click', () => toggleFolderSelection());
     deleteMissing.addEventListener('change', () => updateSelectedSummary());
+    classificationMode.addEventListener('change', () => changeClassificationMode());
+    publishAiRequest.addEventListener('click', () => publishClassificationRequest());
+    loadAiPlan.addEventListener('click', () => loadClassificationPlan());
 
     async function scanSelectedFolder() {
       const pngFiles = Array.from(folderInput.files || []).filter((file) =>
@@ -698,7 +790,13 @@
 
         setProgress(88, '生成同步差异');
         const planStartedAt = performance.now();
-        const result = await request('prepare-sync', { rootName, manifest });
+        currentManifest = manifest;
+        currentRootName = rootName;
+        const result = await request('prepare-sync', {
+          rootName,
+          manifest,
+          classificationMode: classificationMode.value
+        });
         const planFinishedAt = performance.now();
         result.adopted = (result.adopted || 0) + (preflight.adopted || 0);
         result.conflicts = Array.from(new Set([
@@ -736,10 +834,14 @@
       }
     }
 
-    function renderPlan(plan) {
+    function renderPlan(plan, options) {
+      const previousSelection = selectedFolders;
       currentPlan = plan;
       syncComplete = false;
-      selectedFolders = new Set(plan.folders.map((folder) => folder.folderPath));
+      const availableFolders = new Set(plan.folders.map((folder) => folder.folderPath));
+      selectedFolders = options && options.preserveSelection
+        ? new Set(Array.from(previousSelection).filter((folderPath) => availableFolders.has(folderPath)))
+        : availableFolders;
       document.getElementById('rootName').textContent = plan.rootName;
       document.getElementById('adoptedCount').textContent = plan.adopted > 0
         ? `接管 ${plan.adopted}`
@@ -759,7 +861,100 @@
       }
 
       planElement.style.display = 'block';
+      renderClassificationSummary(plan.classification || {});
       updateSelectedSummary();
+    }
+
+    function renderClassificationSummary(summary) {
+      const modeLabels = {
+        strict: '严格尺寸',
+        smart: '智能规则',
+        ai: 'AI 辅助'
+      };
+      const mode = summary.mode || classificationMode.value;
+      classificationMode.value = mode;
+      classificationSummary.textContent = [
+        modeLabels[mode] || mode,
+        `${Number(summary.groups) || 0} 个组件集`,
+        `${Number(summary.groupedAssets) || 0} 个已分组`,
+        `${Number(summary.standaloneAssets) || 0} 个保持独立`,
+        Number(summary.aiGroups) > 0 ? `${summary.aiGroups} 个 AI 组` : ''
+      ].filter(Boolean).join(' · ');
+      aiActions.style.display = mode === 'ai' ? 'grid' : 'none';
+    }
+
+    async function changeClassificationMode() {
+      aiActions.style.display = classificationMode.value === 'ai' ? 'grid' : 'none';
+      aiStatus.style.display = 'none';
+      aiStatus.textContent = '';
+      if (!currentPlan || isBusy) return;
+      setBusy(true);
+      try {
+        const result = await request('set-classification-mode', { mode: classificationMode.value });
+        renderPlan(result, { preserveSelection: true });
+        setStatus('分类方式已更新，画布尚未修改。', 'success');
+      } catch (error) {
+        setStatus(error.message || String(error), 'error');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function publishClassificationRequest() {
+      if (!currentPlan || isBusy || classificationMode.value !== 'ai') return;
+      setBusy(true);
+      try {
+        const result = await request('publish-classification-request', {
+          selectedFolders: Array.from(selectedFolders)
+        });
+        const copied = await copyText(result.prompt || '');
+        aiStatus.style.display = 'block';
+        aiStatus.textContent = copied
+          ? `请求 ${result.requestId} 已写入页面，MCP 提示词已复制。粘贴到 Codex 后，回来点击“读取 AI 方案”。`
+          : `请求 ${result.requestId} 已写入页面。请在 MCP 客户端读取当前页面的 classification-request。`;
+        setStatus(`已为 ${result.folderCount} 个文件夹、${result.assetCount} 个资源生成 AI 分类请求。`, 'success');
+      } catch (error) {
+        setStatus(error.message || String(error), 'error');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadClassificationPlan() {
+      if (!currentPlan || isBusy || classificationMode.value !== 'ai') return;
+      setBusy(true);
+      try {
+        const result = await request('load-classification-plan', {});
+        renderPlan(result, { preserveSelection: true });
+        aiStatus.style.display = 'block';
+        aiStatus.textContent = `已读取并校验 AI 方案：${result.classification.aiGroups || 0} 个 AI 组件集。确认文件夹和变更数量后再开始同步。`;
+        setStatus('AI 分类方案已载入，画布尚未修改。', 'success');
+      } catch (error) {
+        setStatus(error.message || String(error), 'error');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function copyText(value) {
+      if (!value) return false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(value);
+          return true;
+        }
+      } catch (_) {
+        // Fall back to a temporary textarea for older Figma plugin webviews.
+      }
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      return copied;
     }
 
     function createFolderRow(folder) {
@@ -768,7 +963,7 @@
 
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
-      checkbox.checked = true;
+      checkbox.checked = selectedFolders.has(folder.folderPath);
       checkbox.value = folder.folderPath;
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) selectedFolders.add(folder.folderPath);
@@ -823,6 +1018,7 @@
       counters.move.textContent = counts.move;
       counters.unchanged.textContent = counts.unchanged;
       document.getElementById('selectedFolderCount').textContent = `${selectedFolders.size} selected`;
+      publishAiRequest.disabled = isBusy || classificationMode.value !== 'ai' || selectedFolders.size === 0;
       updateFolderSelectionControl();
 
       deleteOption.style.display = missingDeleteCount > 0 ? 'flex' : 'none';
@@ -1124,6 +1320,9 @@
     function setBusy(value) {
       isBusy = value;
       pickButton.disabled = value;
+      classificationMode.disabled = value;
+      publishAiRequest.disabled = value;
+      loadAiPlan.disabled = value;
       if (currentPlan) updateSelectedSummary();
       else syncButton.disabled = true;
     }
@@ -1150,7 +1349,13 @@
       const stageLabels = {
         structure: '合并到一级 Section',
         batch: '插件批量创建 Component',
+        'batch-item': '批量创建 Component',
         'batch-done': '批次创建完成',
+        delete: '删除旧资源',
+        'repair-names': '修复 Variant 名称',
+        'component-sets': '整理 Component Set',
+        sections: '整理 Section',
+        'section-layout': '排列 Section 内容',
         received: '插件已接收',
         image: '创建 Figma 图片',
         layout: '创建 Component',
@@ -1159,11 +1364,18 @@
         failed: '资源处理失败'
       };
       const label = stageLabels[stage] || '处理资源';
-      progressLabel.textContent = relativePath ? `${label}：${relativePath}` : label;
+      const stageProgress = Number(message.total) > 0
+        ? ` ${Number(message.completed) || 0} / ${Number(message.total)}`
+        : '';
+      progressLabel.textContent = relativePath
+        ? `${label}${stageProgress}：${relativePath}`
+        : `${label}${stageProgress}`;
     }
 
     function resetPlan() {
       currentPlan = null;
+      currentManifest = [];
+      currentRootName = '';
       syncComplete = false;
       selectedFolders = new Set();
       planElement.style.display = 'none';
@@ -1171,6 +1383,10 @@
       updateFolderSelectionControl();
       syncButton.disabled = true;
       syncButton.textContent = '等待扫描';
+      classificationSummary.textContent = '扫描后显示分类结果。';
+      aiActions.style.display = classificationMode.value === 'ai' ? 'grid' : 'none';
+      aiStatus.style.display = 'none';
+      aiStatus.textContent = '';
       document.getElementById('footerNote').textContent = '未变化的 Component 不会被重写或移动';
     }
   </script>

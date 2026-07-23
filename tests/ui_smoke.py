@@ -19,7 +19,7 @@ def main() -> None:
             headless=True,
             executable_path=str(edge) if edge else None,
         )
-        page = browser.new_page(viewport={"width": 380, "height": 620}, device_scale_factor=1)
+        page = browser.new_page(viewport={"width": 380, "height": 720}, device_scale_factor=1)
         page.goto((ROOT / "ui.html").as_uri())
         page.wait_for_load_state("networkidle")
         page.evaluate(
@@ -29,6 +29,13 @@ def main() -> None:
               libraryId: 'preview-library',
               adopted: 18,
               conflicts: ['旧资源匹配冲突'],
+              classification: {
+                mode: 'ai',
+                groups: 12,
+                groupedAssets: 30,
+                standaloneAssets: 6,
+                aiGroups: 4
+              },
               summary: { add: 24, update: 6, delete: 3, move: 2, unchanged: 418, conflict: 1 },
               actions: [
                 { type: 'add', folderPath: 'weather', relativePath: 'weather/day/sun.png' },
@@ -50,6 +57,11 @@ def main() -> None:
         page.screenshot(path=str(OUTPUT), full_page=True)
 
         assert page.locator("#plan").is_visible()
+        assert page.locator("#classificationMode").input_value() == "ai"
+        assert page.locator("#aiActions").is_visible()
+        assert page.locator("#publishAiRequest").is_visible()
+        assert page.locator("#loadAiPlan").is_visible()
+        assert "4 个 AI 组" in page.locator("#classificationSummary").inner_text()
         assert page.locator(".folder-row").count() == 4
         assert page.locator("#toggleAllFolders").inner_text() == "全取消"
         assert page.locator(".folder-row input:checked").count() == 4
@@ -58,14 +70,16 @@ def main() -> None:
         assert page.locator("#selectedFolderCount").text_content() == "0 selected"
         assert page.locator(".folder-row input:checked").count() == 0
         assert page.locator("#syncButton").is_disabled()
+        assert page.locator("#publishAiRequest").is_disabled()
         page.locator("#toggleAllFolders").click()
         assert page.locator("#toggleAllFolders").inner_text() == "全取消"
         assert page.locator("#selectedFolderCount").text_content() == "4 selected"
         assert page.locator(".folder-row input:checked").count() == 4
         assert page.locator("#deleteOption").is_visible()
         assert page.locator("#syncButton").is_enabled()
+        assert page.locator("#publishAiRequest").is_enabled()
         assert page.evaluate("document.documentElement.scrollWidth <= 380")
-        assert page.evaluate("document.body.scrollHeight <= 620")
+        assert page.evaluate("document.body.scrollHeight <= 720")
         batch_lengths = page.evaluate(
             """
             fileByPath = new Map(Array.from({ length: 33 }, (_, index) => [
