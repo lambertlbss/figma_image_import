@@ -12,6 +12,7 @@ const CLASSIFICATION_SCHEMA_VERSION = 1;
 const CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.7;
 const SHARED_DATA_CHUNK_CHAR_LIMIT = 20000;
 const SEMANTIC_CANDIDATE_MIN_CONFIDENCE = 0.75;
+const AI_GROUP_MAX_LINEAR_SCALE_RATIO = 1.7506;
 
 const SEMANTIC_STATE_TOKENS = new Set([
   'normal', 'default', 'idle', 'hover', 'over', 'pressed', 'press', 'active',
@@ -78,6 +79,9 @@ figma.ui.onmessage = async (message) => {
         break;
       case 'set-classification-mode':
         data = setClassificationMode(message.payload || {});
+        break;
+      case 'refresh-sync':
+        data = refreshSync(message.payload || {});
         break;
       case 'publish-classification-request':
         data = publishClassificationRequest(message.payload || {});
@@ -247,7 +251,40 @@ function setClassificationMode(payload) {
   assertActiveSync();
   if (activeSync.started) throw new Error('同步已开始，不能再切换分类方式。');
   const mode = normalizeClassificationMode(payload.mode);
-  return rebuildActiveSyncClassification(mode, null);
+  return refreshActiveSyncClassification(mode);
+}
+
+function refreshSync(payload) {
+  assertActiveSync();
+  if (activeSync.started) throw new Error('同步已开始，不能刷新页面状态。');
+  const mode = normalizeClassificationMode(payload.mode || activeSync.classificationMode);
+  return refreshActiveSyncClassification(mode);
+}
+
+function refreshActiveSyncClassification(mode) {
+  const startedAt = Date.now();
+  const adoption = adoptLegacySections(
+    activeSync.baseManifest,
+    activeSync.libraryId,
+    activeSync.rootName
+  );
+  activeSync.index = scanLibrary(activeSync.libraryId);
+  activeSync.legacyConflictPaths = new Set(adoption.conflictPaths || []);
+  activeSync.legacyConflicts = Array.isArray(adoption.conflicts)
+    ? adoption.conflicts.slice()
+    : [];
+  activeSync.classificationRequestId = '';
+  activeSync.classificationRequestFolders = new Set();
+  activeSync.classificationRequestPaths = new Set();
+  clearChunkedSharedJson(CLASSIFICATION_REQUEST_KEY);
+  clearChunkedSharedJson(CLASSIFICATION_PLAN_KEY);
+  preparedScanCache = null;
+
+  const result = rebuildActiveSyncClassification(mode, null);
+  result.adopted = Number(adoption.adopted) || 0;
+  result.scanIndexReused = false;
+  result.timingMs = Date.now() - startedAt;
+  return result;
 }
 
 function publishClassificationRequest(payload) {
@@ -270,7 +307,8 @@ function publishClassificationRequest(payload) {
       name: entry.name,
       width: entry.width,
       height: entry.height,
-      nodeId: component && !component.removed ? component.id : null
+      nodeId: component && !component.removed ? component.id : null,
+      existingComponentSet: describeExistingComponentSet(component)
     };
   });
   const strict = classifyManifest(requestManifest, 'strict', null);
@@ -305,8 +343,19 @@ function publishClassificationRequest(payload) {
       signalPriority: ['一级文件夹边界', '名称模板与变化槽位', '资源路径', '视觉风格', '尺寸关系'],
       mergeRequirements: [
         '必须能说明明确的关系类型，例如状态、方向、品质、字形、动画帧、主题或样式',
-        '相同目录、相同尺寸或通用名称前缀本身不足以支持合并'
+        '相同目录、相同尺寸或通用名称前缀本身不足以支持合并',
+        `同组最大线性尺寸与最小线性尺寸之比不得超过 ${AI_GROUP_MAX_LINEAR_SCALE_RATIO}，线性尺寸按 sqrt(width * height) 计算`
       ],
+      sizeLimits: {
+        maxLinearScaleRatio: AI_GROUP_MAX_LINEAR_SCALE_RATIO,
+        linearScaleDefinition: 'sqrt(width * height)'
+      },
+      componentSetNaming: {
+        sizeOnlyExample: '23x32',
+        renameSizeOnlyNames: true,
+        preserveSemanticNames: true,
+        rule: '已有组件集名称只有在整个名称是“宽x高”尺寸占位符时才允许 AI 改名；其他名称必须原样保留。'
+      },
       fallback: '证据不足时不写入计划，让资源继续保持严格尺寸分类。'
     },
     responseContract: {
@@ -358,6 +407,22 @@ function buildFigmaPageUrl(fileKey, pageId) {
   if (!fileKey || !pageId) return null;
   const normalizedNodeId = String(pageId).replace(/:/g, '-');
   return `https://www.figma.com/design/${encodeURIComponent(String(fileKey))}/current-page?node-id=${encodeURIComponent(normalizedNodeId)}`;
+}
+
+function describeExistingComponentSet(component) {
+  const componentSet = component && !component.removed &&
+    component.parent && component.parent.type === 'COMPONENT_SET'
+    ? component.parent
+    : null;
+  if (!componentSet || componentSet.removed) return null;
+  const name = String(componentSet.name || '').trim();
+  const renameAllowed = isSizeOnlyComponentSetName(name);
+  return {
+    nodeId: componentSet.id,
+    name,
+    renameAllowed,
+    namePolicy: renameAllowed ? 'rename-size-placeholder' : 'preserve-existing'
+  };
 }
 
 function loadClassificationPlan() {
@@ -651,9 +716,13 @@ function buildClassificationPrompt(request) {
     '先全局检查 request.semanticCandidates，再检查 strictGroups；semanticCandidates 只是可解释线索，不是必须照搬的最终分组。',
     '分析名称中的稳定部分和变化槽位，识别状态、方向、品质、数字/文字字形、动画帧、主题和样式系列。',
     '尺寸不同不能直接否决合并：字符宽度、状态资源、倍率资源和帧序列可能天然跨尺寸。',
+    `但同一组件集的线性尺寸比例不得超过 ${AI_GROUP_MAX_LINEAR_SCALE_RATIO}（线性尺寸=sqrt(width*height)）。`,
+    '超过尺寸限制的资源必须拆组或保持独立，不要写入同一个 AI 组件集。',
     '相同目录、相同尺寸或 common/bg/icon 等通用前缀本身不足以支持合并；每个 AI 组都应有明确且可解释的共同用途。',
     '完成分组后做全局遗漏检查，确认同一系列没有散落在其他尺寸组，也没有只识别一部分成员。',
     '每个组件集只使用一个 Variant Property；AI 可以调整 variantProperty，但 members 只填写资源路径。',
+    '检查 request.assets[].existingComponentSet：已有组件集名称只有在整个名称是“宽x高”（如 23x32、35×36）尺寸占位符时才允许重命名。',
+    '已有组件集名称只要不是纯尺寸名，就必须原样保留；插件也会在读取方案时强制执行此规则。',
     '不要生成或修改每个资源的 Variant 值；插件会固定使用资源名作为 Variant 值。',
     '未写入 groups 或 standalone 的资源继续保持严格尺寸分类；不要跨一级文件夹合并资源。',
     `将结果按 request.responseContract 写回同一页面：namespace="${SHARED_DATA_NAMESPACE}", index key="${CLASSIFICATION_PLAN_KEY}"。`,
@@ -1097,6 +1166,7 @@ function applyAiClassificationPlan(manifest, plan) {
     if (entries.length < 2) continue;
     const folders = new Set(entries.map((entry) => entry.folderPath));
     if (folders.size !== 1) throw new Error(`AI 组“${rawGroup.name || rawGroup.id || '未命名'}”跨越了多个一级文件夹。`);
+    validateAiGroupSize(entries, rawGroup.name || rawGroup.id || '未命名');
     for (const entry of entries) {
       if (assigned.has(entry.relativePath)) throw new Error(`AI 分类方案重复分配资源：${entry.relativePath}`);
       assigned.add(entry.relativePath);
@@ -1108,11 +1178,12 @@ function applyAiClassificationPlan(manifest, plan) {
     }
     usedGroupKeys.add(groupStorageKey);
     const property = String(rawGroup.variantProperty || DEFAULT_VARIANT_PROPERTY).trim() || DEFAULT_VARIANT_PROPERTY;
+    const componentSetName = resolveAiComponentSetName(rawGroup, entries, id);
     for (let index = 0; index < entries.length; index++) {
       const entry = entries[index];
       assignEntryClassification(entry, {
         key: `ai:${id}`,
-        name: String(rawGroup.name || id).trim() || id,
+        name: componentSetName,
         property,
         value: entry.name,
         source: 'ai',
@@ -1127,6 +1198,45 @@ function applyAiClassificationPlan(manifest, plan) {
     if (assigned.has(relativePath)) throw new Error(`资源同时出现在 AI 组件集与 standalone 中：${relativePath}`);
     assignEntryClassification(entry, null);
   }
+}
+
+function validateAiGroupSize(entries, groupName) {
+  const linearScales = entries.map((entry) => Math.sqrt(entry.width * entry.height));
+  const linearScaleRatio = Math.max(...linearScales) / Math.min(...linearScales);
+
+  if (linearScaleRatio > AI_GROUP_MAX_LINEAR_SCALE_RATIO) {
+    throw new Error(
+      `AI 组“${groupName}”的组件大小差距过大：线性尺寸相差 ${linearScaleRatio.toFixed(2)} 倍，` +
+      `插件上限为 ${AI_GROUP_MAX_LINEAR_SCALE_RATIO} 倍。请拆分组件集后重新生成方案。`
+    );
+  }
+}
+
+function resolveAiComponentSetName(rawGroup, entries, fallbackId) {
+  const proposedName = String(rawGroup && rawGroup.name || fallbackId).trim() || fallbackId;
+  const preservedNames = new Set();
+  if (!activeSync || !activeSync.index || !activeSync.index.components) return proposedName;
+
+  for (const entry of entries) {
+    const component = activeSync.index.components.get(entry.relativePath);
+    const componentSet = component && !component.removed &&
+      component.parent && component.parent.type === 'COMPONENT_SET'
+      ? component.parent
+      : null;
+    if (!componentSet || componentSet.removed) continue;
+    const existingName = String(componentSet.name || '').trim();
+    if (existingName && !isSizeOnlyComponentSetName(existingName)) {
+      preservedNames.add(existingName);
+    }
+  }
+
+  if (preservedNames.size > 1) {
+    throw new Error(
+      `AI 组“${proposedName}”试图合并多个已有语义组件集：${Array.from(preservedNames).join('、')}。` +
+      '请先手工确认名称，或保持这些组件集独立。'
+    );
+  }
+  return preservedNames.size === 1 ? Array.from(preservedNames)[0] : proposedName;
 }
 
 function normalizeAiPlanMember(value) {
@@ -1607,6 +1717,12 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
     const currentSetKey = insideComponentSet
       ? componentSetStorageKey(readMeta(node.parent), node.parent)
       : null;
+    const expectedSetName = expectedEntry
+      ? String(expectedEntry.componentSetName || expectedSetKey || '').trim()
+      : '';
+    const currentSetName = insideComponentSet
+      ? String(node.parent.name || '').trim()
+      : '';
     return {
       relativePath,
       folderPath,
@@ -1618,6 +1734,7 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
       height,
       needsStructureRepair: expectsComponentSet
         ? (!insideComponentSet || currentSetKey !== expectedSetKey ||
+          currentSetName !== expectedSetName ||
           node.name !== formatEntryVariantName(node.parent, expectedEntry))
         : (insideComponentSet || node.name !== resourceName),
       managed: true,
@@ -1692,6 +1809,8 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
         folderPath: entry.folderPath,
         relativePath: entry.relativePath,
         oldRelativePath: remote.relativePath,
+        previousWidth: remote.width,
+        previousHeight: remote.height,
         entry,
         node: remote.node
       });
@@ -1725,6 +1844,8 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
       name: remote.name,
       required: true,
       reason: 'duplicate-name',
+      previousWidth: remote.width,
+      previousHeight: remote.height,
       node: remote.node
     });
   }
@@ -1738,6 +1859,8 @@ function buildSyncPlan(manifest, index, legacyConflictPaths) {
       name: remote.name,
       required: false,
       reason: 'missing-local',
+      previousWidth: remote.width,
+      previousHeight: remote.height,
       node: remote.node
     });
   }
@@ -1886,6 +2009,8 @@ function addMatchedResourceAction(actions, actionByPath, entry, remote) {
     folderPath: entry.folderPath,
     relativePath: entry.relativePath,
     oldRelativePath: pathChanged ? remote.relativePath : null,
+    previousWidth: remote.width,
+    previousHeight: remote.height,
     entry,
     node: remote.node
   });
@@ -1916,6 +2041,11 @@ function serializeAction(action) {
     relativePath: action.relativePath,
     oldRelativePath: action.oldRelativePath || null,
     name: action.entry ? action.entry.name : (action.name || basenameWithoutExtension(action.relativePath)),
+    width: action.entry ? action.entry.width : (Number(action.previousWidth) || 0),
+    height: action.entry ? action.entry.height : (Number(action.previousHeight) || 0),
+    previousWidth: Number(action.previousWidth) || 0,
+    previousHeight: Number(action.previousHeight) || 0,
+    layoutOnly: action.layoutOnly === true,
     required: action.required === true,
     reason: action.reason || null
   };
@@ -2015,8 +2145,12 @@ function updateExistingComponent(component, entry, imageHash, action) {
   if (dimensionsChanged || folderChanged || groupChanged || containerChanged) {
     attachComponentToManagedGroup(component, entry);
     cleanupFormerContainer(previousParent);
-  } else if (action && action.layoutOnly) {
-    markTouchedContainer(component.parent);
+  } else {
+    if (expectsComponentSet && insideComponentSet) {
+      writeComponentSetClassificationMeta(previousParent, entry);
+      activeSync.touchedNodes.add(previousParent);
+    }
+    if (action && action.layoutOnly) markTouchedContainer(component.parent);
   }
 
   activeSync.index.components.delete(normalizeRelativePath(previousMeta.relativePath));
@@ -2081,6 +2215,9 @@ function moveExistingComponent(action) {
   if (folderChanged || dimensionsChanged || groupChanged || containerChanged) {
     attachComponentToManagedGroup(component, action.entry);
     cleanupFormerContainer(previousParent);
+  } else if (expectsComponentSet && insideComponentSet) {
+    writeComponentSetClassificationMeta(previousParent, action.entry);
+    activeSync.touchedNodes.add(previousParent);
   }
   if (action.layoutOnly) {
     const section = containingSection(component);
@@ -2939,19 +3076,29 @@ function componentSetStorageKey(meta, componentSet) {
 
 function writeComponentSetClassificationMeta(componentSet, entry) {
   const key = componentSetKeyForEntry(entry);
+  const requestedName = entry.componentSetName || key;
+  const existingName = String(componentSet.name || '').trim();
+  const componentSetName = entry.classificationSource === 'ai' &&
+    existingName && !isSizeOnlyComponentSetName(existingName)
+    ? existingName
+    : requestedName;
   writeMeta(componentSet, {
     role: 'component-set',
     libraryId: activeSync.libraryId,
     rootName: activeSync.rootName,
     folderPath: entry.folderPath,
     componentSetKey: key,
-    componentSetName: entry.componentSetName || key,
+    componentSetName,
     variantProperty: entry.variantProperty || DEFAULT_VARIANT_PROPERTY,
     classificationSource: entry.classificationSource || 'strict',
     classificationConfidence: Number(entry.classificationConfidence) || 0,
     sizeKey: entry.classificationSource === 'strict' ? key : null
   });
-  componentSet.name = entry.componentSetName || key;
+  componentSet.name = componentSetName;
+}
+
+function isSizeOnlyComponentSetName(value) {
+  return /^\s*\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*$/i.test(String(value || ''));
 }
 
 function sizeKey(width, height) {

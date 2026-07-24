@@ -230,6 +230,42 @@ test('prepare scan reuses hashes for unchanged files and requests only changed c
   assert.equal(prepared.scanIndexReused, true);
 });
 
+test('switching classification mode after sync refreshes the page index instead of re-adding existing resources', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/home.png', 'common', 'home', 'h-home', 24, 24),
+    asset('common/search.png', 'common', 'search', 'h-search', 24, 24)
+  ];
+  await importAll(runtime, manifest);
+
+  const switched = await runtime.send('set-classification-mode', { mode: 'ai' });
+  assert.equal(switched.summary.add, 0);
+  assert.equal(switched.summary.update, 0);
+  assert.equal(switched.summary.unchanged, manifest.length);
+  assert.equal(switched.scanIndexReused, false);
+
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+  assert.equal(published.assetCount, manifest.length);
+  assert.ok(request.assets.every((entry) => entry.nodeId));
+
+  const refreshed = await runtime.send('refresh-sync', { mode: 'ai' });
+  assert.equal(refreshed.summary.add, 0);
+  assert.equal(refreshed.summary.unchanged, manifest.length);
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+    schemaVersion: 1,
+    requestId: published.requestId,
+    groups: [],
+    standalone: []
+  });
+  await assert.rejects(
+    () => runtime.send('load-classification-plan', {}),
+    /当前扫描尚未生成 AI 分类请求/
+  );
+});
+
 test('reusing the prepared scan does not count legacy Section adoption twice', async () => {
   const runtime = createRuntime();
   const manifest = [asset('common/home.png', 'common', 'home', 'h-home', 24, 24)];
@@ -325,6 +361,11 @@ test('a same-name replacement can change dimensions without creating another Com
     manifest: [replacement]
   });
   assert.equal(prepared.summary.update, 1);
+  const updateAction = prepared.actions.find((action) => action.type === 'update');
+  assert.equal(updateAction.previousWidth, 24);
+  assert.equal(updateAction.previousHeight, 24);
+  assert.equal(updateAction.width, 48);
+  assert.equal(updateAction.height, 32);
   await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
   await runtime.apply(replacement.relativePath, 48, 32);
   await runtime.send('finish-sync', {});
@@ -610,6 +651,11 @@ test('same-folder rename preserves node id and coordinates', async () => {
   const renamed = [asset('icons/house.png', 'icons', 'house', 'same-hash', 24, 24)];
   const prepared = await runtime.send('prepare-sync', { rootName: 'library', manifest: renamed });
   assert.equal(prepared.summary.move, 1);
+  const moveAction = prepared.actions.find((action) => action.type === 'move');
+  assert.equal(moveAction.oldRelativePath, 'icons/home.png');
+  assert.equal(moveAction.relativePath, 'icons/house.png');
+  assert.equal(moveAction.previousWidth, 24);
+  assert.equal(moveAction.width, 24);
   await runtime.send('begin-sync', { selectedFolders: ['icons'], deleteMissing: true });
   await runtime.send('finish-sync', {});
 
@@ -1035,8 +1081,8 @@ test('strict and AI modes defer standalone placement and converge to the same ba
 test('MCP classification request round-trips through shared plugin data and applies an approved AI plan', async () => {
   const runtime = createRuntime();
   const manifest = [
-    asset('common/close_primary.png', 'common', 'close_primary', 'h-primary', 45, 49),
-    asset('common/close_compact.png', 'common', 'close_compact', 'h-compact', 44, 48)
+    asset('common/close_primary.png', 'common', 'close_primary', 'h-primary', 12, 31),
+    asset('common/close_compact.png', 'common', 'close_compact', 'h-compact', 30, 38)
   ];
   const prepared = await runtime.send('prepare-sync', {
     rootName: 'library',
@@ -1062,8 +1108,13 @@ test('MCP classification request round-trips through shared plugin data and appl
   assert.match(published.prompt, /固定使用资源名作为 Variant 值/);
   assert.match(published.prompt, /必须做双向审核/);
   assert.match(published.prompt, /合并跨尺寸/);
+  assert.match(published.prompt, /线性尺寸比例不得超过 1\.7506/);
   assert.ok(Array.isArray(request.semanticCandidates));
   assert.ok(Array.isArray(request.classificationGuidance.requiredPasses));
+  const sizeLimits = request.classificationGuidance.sizeLimits;
+  assert.equal(sizeLimits.maxLinearScaleRatio, 1.7506);
+  assert.equal(sizeLimits.linearScaleDefinition, 'sqrt(width * height)');
+  assert.equal('geometryLimits' in request.classificationGuidance, false);
   assert.deepEqual(
     JSON.parse(JSON.stringify(request.responseContract.groups[0].members)),
     ['folder/file.png']
@@ -1101,6 +1152,146 @@ test('MCP classification request round-trips through shared plugin data and appl
     componentSet.children.map((node) => node.name).sort(),
     ['Size=close_compact', 'Size=close_primary']
   );
+});
+
+test('AI classification rejects a component set whose component sizes differ too much', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/badge_small.png', 'common', 'badge_small', 'h-small', 16, 16),
+    asset('common/badge_huge.png', 'common', 'badge_huge', 'h-huge', 128, 128)
+  ];
+  await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+    schemaVersion: 1,
+    requestId: published.requestId,
+    groups: [{
+      id: 'badge-scale',
+      name: 'Badge/Scale',
+      confidence: 0.98,
+      variantProperty: 'Variant',
+      members: manifest.map((entry) => entry.relativePath)
+    }],
+    standalone: []
+  });
+
+  await assert.rejects(
+    () => runtime.send('load-classification-plan', {}),
+    /组件大小差距过大：线性尺寸相差 8\.00 倍/
+  );
+  assert.equal(runtime.section('common'), null);
+});
+
+test('AI classification preserves an existing semantic Component Set name', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/close_primary.png', 'common', 'close_primary', 'h-primary', 45, 49),
+    asset('common/close_compact.png', 'common', 'close_compact', 'h-compact', 44, 48)
+  ];
+  await syncWithAiGroup(runtime, manifest, {
+    id: 'close-control',
+    name: 'Controls/Existing',
+    confidence: 0.98,
+    variantProperty: 'Size',
+    members: manifest.map((entry) => entry.relativePath)
+  });
+
+  const prepared = await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  assert.equal(prepared.summary.add, 0);
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+  assert.ok(request.assets.every((entry) => entry.existingComponentSet));
+  assert.ok(request.assets.every((entry) =>
+    entry.existingComponentSet.name === 'Controls/Existing' &&
+    entry.existingComponentSet.renameAllowed === false &&
+    entry.existingComponentSet.namePolicy === 'preserve-existing'
+  ));
+  assert.equal(request.classificationGuidance.componentSetNaming.preserveSemanticNames, true);
+  assert.match(published.prompt, /不是纯尺寸名，就必须原样保留/);
+
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+    schemaVersion: 1,
+    requestId: published.requestId,
+    groups: [{
+      id: 'close-control',
+      name: 'Controls/Renamed By AI',
+      confidence: 0.98,
+      variantProperty: 'State',
+      members: manifest.map((entry) => entry.relativePath)
+    }],
+    standalone: []
+  });
+  await runtime.send('load-classification-plan', {});
+  await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
+  await runtime.send('finish-sync', {});
+
+  const componentSet = runtime.section('common').children.find((node) => node.type === 'COMPONENT_SET');
+  assert.equal(componentSet.name, 'Controls/Existing');
+  const meta = JSON.parse(componentSet.getPluginData(META_KEY));
+  assert.equal(meta.componentSetName, 'Controls/Existing');
+});
+
+test('AI classification may replace a size-only Component Set name with a semantic name', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/close_primary.png', 'common', 'close_primary', 'h-primary', 45, 49),
+    asset('common/close_compact.png', 'common', 'close_compact', 'h-compact', 44, 48)
+  ];
+  await syncWithAiGroup(runtime, manifest, {
+    id: 'close-control',
+    name: '35 × 36',
+    confidence: 0.98,
+    variantProperty: 'Size',
+    members: manifest.map((entry) => entry.relativePath)
+  });
+
+  await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+  assert.ok(request.assets.every((entry) =>
+    entry.existingComponentSet.name === '35 × 36' &&
+    entry.existingComponentSet.renameAllowed === true &&
+    entry.existingComponentSet.namePolicy === 'rename-size-placeholder'
+  ));
+
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+    schemaVersion: 1,
+    requestId: published.requestId,
+    groups: [{
+      id: 'close-control',
+      name: 'Controls/Close',
+      confidence: 0.98,
+      variantProperty: 'State',
+      members: manifest.map((entry) => entry.relativePath)
+    }],
+    standalone: []
+  });
+  await runtime.send('load-classification-plan', {});
+  await runtime.send('begin-sync', { selectedFolders: ['common'], deleteMissing: true });
+  await runtime.send('finish-sync', {});
+
+  const componentSet = runtime.section('common').children.find((node) => node.type === 'COMPONENT_SET');
+  assert.equal(componentSet.name, 'Controls/Close');
+  const meta = JSON.parse(componentSet.getPluginData(META_KEY));
+  assert.equal(meta.componentSetName, 'Controls/Close');
 });
 
 test('AI classification collapses legacy multi-property variants to one Property with resource-name values', async () => {
@@ -1418,6 +1609,33 @@ async function importAll(runtime, manifest) {
     });
   }
   return runtime.send('finish-sync', {});
+}
+
+async function syncWithAiGroup(runtime, manifest, group) {
+  await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: Array.from(new Set(manifest.map((entry) => entry.folderPath)))
+  });
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+    schemaVersion: 1,
+    requestId: published.requestId,
+    groups: [group],
+    standalone: []
+  });
+  await runtime.send('load-classification-plan', {});
+  const begin = await runtime.send('begin-sync', {
+    selectedFolders: Array.from(new Set(manifest.map((entry) => entry.folderPath))),
+    deleteMissing: true
+  });
+  for (const relativePath of begin.fileActions) {
+    const entry = manifest.find((candidate) => candidate.relativePath === relativePath);
+    await runtime.apply(relativePath, entry.width, entry.height);
+  }
+  await runtime.send('finish-sync', {});
 }
 
 function sectionFolder(relativePath) {
