@@ -796,6 +796,281 @@
       line-height: 1.4;
     }
 
+    .anomaly-row {
+      min-width: 0;
+      padding: 10px;
+      background: #fffdf7;
+      border: 1px solid #dfd4b8;
+      border-left: 3px solid #c58a18;
+      border-radius: 7px;
+      box-shadow: 0 3px 10px rgba(60, 42, 12, 0.055);
+    }
+
+    .anomaly-row.high {
+      background: #fff8f5;
+      border-color: #e6c5bb;
+      border-left-color: #c94b34;
+    }
+
+    .anomaly-top {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .anomaly-level {
+      padding: 2px 5px;
+      color: #7c5817;
+      background: #f9e9b8;
+      border-radius: 3px;
+      font-family: Consolas, monospace;
+      font-size: 8px;
+      font-weight: 700;
+    }
+
+    .anomaly-row.high .anomaly-level {
+      color: #922f20;
+      background: #fee2dc;
+    }
+
+    .anomaly-name {
+      overflow: hidden;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .anomaly-size {
+      color: #8a4d06;
+      font-family: Consolas, monospace;
+      font-size: 10px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .anomaly-row.high .anomaly-size { color: #a73523; }
+
+    .anomaly-path {
+      overflow-wrap: anywhere;
+      margin-top: 6px;
+      color: #4c4a41;
+      font-family: Consolas, monospace;
+      font-size: 9px;
+      line-height: 1.4;
+    }
+
+    .anomaly-metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 7px;
+    }
+
+    .anomaly-metric {
+      padding: 3px 5px;
+      color: #65583f;
+      background: rgba(255, 255, 255, 0.75);
+      border: 1px solid #e1d7c0;
+      border-radius: 4px;
+      font-family: Consolas, monospace;
+      font-size: 8px;
+    }
+
+    .anomaly-reasons {
+      margin-top: 6px;
+      color: #78623d;
+      font-size: 9px;
+      line-height: 1.45;
+    }
+
+    .anomaly-row.high .anomaly-reasons { color: #8f483b; }
+
+    .component-set-card {
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      box-shadow: 0 3px 10px rgba(24, 31, 25, 0.045);
+    }
+
+    .component-set-card summary {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      min-height: 52px;
+      padding: 8px 10px;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+
+    .component-set-card summary::-webkit-details-marker { display: none; }
+    .component-set-card summary:hover { background: #f7f8f4; }
+
+    .component-set-chevron {
+      width: 18px;
+      height: 18px;
+      display: grid;
+      place-items: center;
+      color: #5c645e;
+      background: #edf0eb;
+      border-radius: 4px;
+      font-size: 10px;
+      transition: transform 140ms ease, background 140ms ease;
+    }
+
+    .component-set-card[open] .component-set-chevron {
+      color: #fff;
+      background: #1d2821;
+      transform: rotate(90deg);
+    }
+
+    .component-set-heading {
+      min-width: 0;
+    }
+
+    .component-set-name {
+      overflow: hidden;
+      font-weight: 750;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .component-set-meta {
+      overflow: hidden;
+      margin-top: 3px;
+      color: var(--muted);
+      font-family: Consolas, monospace;
+      font-size: 8px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .component-set-count {
+      color: #4d554f;
+      font-family: Consolas, monospace;
+      font-size: 9px;
+      white-space: nowrap;
+    }
+
+    .component-set-body {
+      padding: 9px 10px 10px;
+      background: #f2f4ef;
+      border-top: 1px solid var(--line);
+    }
+
+    .component-set-changes {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+
+    .component-set-change-chip {
+      padding: 2px 5px;
+      color: #59605a;
+      background: #fff;
+      border: 1px solid #d5d9d2;
+      border-radius: 3px;
+      font-family: Consolas, monospace;
+      font-size: 8px;
+    }
+
+    .component-members {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .component-member {
+      min-width: 0;
+      padding: 6px;
+      background: #fff;
+      border: 1px solid #d9ddd6;
+      border-radius: 6px;
+    }
+
+    .component-thumb {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background-color: #f4f4f1;
+      background-image:
+        linear-gradient(45deg, #e5e7e2 25%, transparent 25%),
+        linear-gradient(-45deg, #e5e7e2 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #e5e7e2 75%),
+        linear-gradient(-45deg, transparent 75%, #e5e7e2 75%);
+      background-position: 0 0, 0 5px, 5px -5px, -5px 0;
+      background-size: 10px 10px;
+      border: 1px solid #e0e3dd;
+      border-radius: 4px;
+    }
+
+    .component-thumb img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: contain;
+    }
+
+    .component-thumb-placeholder {
+      padding: 4px;
+      color: #777e78;
+      font-size: 8px;
+      line-height: 1.3;
+      text-align: center;
+    }
+
+    .component-member-name {
+      overflow: hidden;
+      margin-top: 5px;
+      font-size: 9px;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .component-member-meta {
+      overflow: hidden;
+      margin-top: 2px;
+      color: var(--muted);
+      font-family: Consolas, monospace;
+      font-size: 8px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .component-member-change {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 1px 4px;
+      color: #5b625d;
+      background: #edf0eb;
+      border-radius: 3px;
+      font-size: 8px;
+    }
+
+    .component-member-change.add { color: #166a42; background: #dff5e9; }
+    .component-member-change.update { color: #8c4800; background: #fff0da; }
+    .component-member-change.move { color: #56368f; background: #eee7fb; }
+
+    .component-members-more {
+      width: 100%;
+      min-height: 32px;
+      margin-top: 7px;
+      color: #35433a;
+      background: #fff;
+      border: 1px solid var(--line-strong);
+      border-radius: 5px;
+      font-size: 9px;
+      font-weight: 650;
+    }
+
     .preview-empty {
       padding: 38px 18px;
       color: var(--muted);
@@ -957,6 +1232,8 @@
       <div class="preview-toolbar">
         <div id="previewTabs" class="preview-tabs" aria-label="变动类型">
           <button class="preview-tab active" type="button" data-preview-filter="changes">全部变动<span class="tab-count">0</span></button>
+          <button class="preview-tab" type="button" data-preview-filter="componentSets">组件集<span class="tab-count">0</span></button>
+          <button class="preview-tab" type="button" data-preview-filter="anomalies">异常资源<span class="tab-count">0</span></button>
           <button class="preview-tab" type="button" data-preview-filter="add">新增<span class="tab-count">0</span></button>
           <button class="preview-tab" type="button" data-preview-filter="update">更新<span class="tab-count">0</span></button>
           <button class="preview-tab" type="button" data-preview-filter="delete">删除<span class="tab-count">0</span></button>
@@ -1036,6 +1313,8 @@
     const pendingRequests = new Map();
     let currentPlan = null;
     let currentManifest = [];
+    let currentLocalResourceCount = 0;
+    let localResourceDiagnostics = [];
     let currentRootName = '';
     let fileByPath = new Map();
     let selectedFolders = new Set();
@@ -1045,6 +1324,8 @@
     let previewRenderLimit = 80;
     let previewPreviousFocus = null;
     const PREVIEW_PAGE_SIZE = 80;
+    const COMPONENT_MEMBER_PAGE_SIZE = 48;
+    const previewObjectUrls = new Set();
     const REQUEST_TIMEOUT_MS = 600000;
     const APPLY_BATCH_TIMEOUT_MS = 180000;
     const APPLY_BATCH_MAX_FILES = 48;
@@ -1053,6 +1334,15 @@
     const APPLY_BATCH_MEDIUM_FILE_BYTES = 512 * 1024;
     const HEADER_CONCURRENCY = 12;
     const HASH_CONCURRENCY = 6;
+    const ANOMALY_READ_CONCURRENCY = 3;
+    const ANOMALY_METADATA_BYTES = 256 * 1024;
+    const ANOMALY_METADATA_RATIO_BYTES = 64 * 1024;
+    const ANOMALY_METADATA_RATIO = 0.3;
+    const ANOMALY_OUTLIER_RATIO = 4;
+    const ANOMALY_OUTLIER_EXCESS_BYTES = 128 * 1024;
+    const ANOMALY_BPP = 8;
+    const ANOMALY_BPP_MIN_BYTES = 128 * 1024;
+    const ANOMALY_LARGE_FILE_BYTES = 5 * 1024 * 1024;
 
     window.addEventListener('message', (event) => {
       const message = event.data && event.data.pluginMessage;
@@ -1105,6 +1395,7 @@
       const button = event.target.closest('[data-preview-filter]');
       if (!button || isBusy) return;
       previewFilter = button.dataset.previewFilter;
+      populatePreviewFolderOptions();
       renderChangePreview(true);
     });
     previewSearch.addEventListener('input', () => renderChangePreview(true));
@@ -1182,6 +1473,18 @@
         const manifest = dedupeNewestResources(validManifest);
         const duplicateNameCount = validManifest.length - manifest.length;
         if (manifest.length === 0) throw new Error('文件夹中没有有效的 PNG 图片。');
+        setProgress(31, '检查异常资源体积');
+        const anomalyStartedAt = performance.now();
+        localResourceDiagnostics = await analyzeLocalResourceAnomalies(
+          validManifest,
+          fileByPath,
+          (completed, total) => {
+            const ratio = total > 0 ? completed / total : 1;
+            setProgress(31 + Math.round(ratio * 3), `分析疑似异常 PNG ${completed} / ${total}`);
+          }
+        );
+        currentLocalResourceCount = validManifest.length;
+        const anomalyFinishedAt = performance.now();
         setProgress(34, '快速比对 Figma 资源索引');
         const preflightStartedAt = performance.now();
         const preflight = await request('prepare-scan', { rootName, manifest });
@@ -1223,6 +1526,7 @@
         ]));
         result.scanTimings = {
           headerMs: headerFinishedAt - scanStartedAt,
+          anomalyMs: anomalyFinishedAt - anomalyStartedAt,
           preflightMs: preflightFinishedAt - preflightStartedAt,
           hashMs: hashFinishedAt - hashStartedAt,
           planMs: planFinishedAt - planStartedAt,
@@ -1235,6 +1539,9 @@
         const notes = [];
         if (duplicateNameCount > 0) notes.push(`同名覆盖 ${duplicateNameCount} 个旧文件`);
         if (invalidCount > 0) notes.push(`跳过 ${invalidCount} 个无效 PNG`);
+        if (localResourceDiagnostics.length > 0) {
+          notes.push(`发现 ${localResourceDiagnostics.length} 个异常资源`);
+        }
         const suffix = notes.length > 0 ? `，${notes.join('，')}` : '';
         const seconds = ((performance.now() - scanStartedAt) / 1000).toFixed(1);
         setStatus(
@@ -1293,7 +1600,6 @@
       previewSearch.value = '';
       populatePreviewFolderOptions();
       previewFolderFilter.value = '';
-      previewSubtitle.textContent = `${currentPlan.rootName} · ${selectedFolders.size} 个已选文件夹`;
       previewView.classList.add('visible');
       previewView.setAttribute('aria-hidden', 'false');
       renderChangePreview(true);
@@ -1304,6 +1610,7 @@
       if (!previewView.classList.contains('visible')) return;
       previewView.classList.remove('visible');
       previewView.setAttribute('aria-hidden', 'true');
+      releasePreviewObjectUrls();
       previewList.replaceChildren();
       previewLoadMore.hidden = true;
       if (restoreFocus && previewPreviousFocus && typeof previewPreviousFocus.focus === 'function') {
@@ -1314,13 +1621,20 @@
 
     function populatePreviewFolderOptions() {
       const previousValue = previewFolderFilter.value;
-      previewFolderFilter.replaceChildren(new Option('所有已选文件夹', ''));
-      const folders = currentPlan
-        ? currentPlan.folders
-          .map((folder) => folder.folderPath)
-          .filter((folderPath) => selectedFolders.has(folderPath))
+      const anomalyMode = previewFilter === 'anomalies';
+      previewFolderFilter.replaceChildren(new Option(
+        anomalyMode ? '所有本地文件夹' : '所有已选文件夹',
+        ''
+      ));
+      const folders = anomalyMode
+        ? Array.from(new Set(localResourceDiagnostics.map((item) => item.folderPath)))
           .sort((a, b) => a.localeCompare(b))
-        : [];
+        : (currentPlan
+          ? currentPlan.folders
+            .map((folder) => folder.folderPath)
+            .filter((folderPath) => selectedFolders.has(folderPath))
+            .sort((a, b) => a.localeCompare(b))
+          : []);
       for (const folderPath of folders) {
         previewFolderFilter.appendChild(new Option(folderPath, folderPath));
       }
@@ -1329,6 +1643,7 @@
 
     function renderChangePreview(resetLimit) {
       if (!currentPlan || !previewView.classList.contains('visible')) return;
+      releasePreviewObjectUrls();
       if (resetLimit) {
         previewRenderLimit = PREVIEW_PAGE_SIZE;
         previewListWrap.scrollTop = 0;
@@ -1341,10 +1656,46 @@
       for (const action of selectedActions) {
         if (Object.prototype.hasOwnProperty.call(counts, action.type)) counts[action.type]++;
       }
-      updatePreviewTabs(counts);
+      const componentSetGroups = buildChangedComponentSetGroups(selectedActions);
+      updatePreviewTabs(counts, componentSetGroups.length, localResourceDiagnostics.length);
 
       const folderPath = previewFolderFilter.value;
       const query = previewSearch.value.trim().toLocaleLowerCase();
+      if (previewFilter === 'anomalies') {
+        previewSubtitle.textContent =
+          `${currentPlan.rootName} · 已检查 ${currentLocalResourceCount} 个本地资源`;
+        const filteredAnomalies = localResourceDiagnostics.filter((item) => {
+          if (folderPath && item.folderPath !== folderPath) return false;
+          if (!query) return true;
+          return [
+            item.name,
+            item.relativePath,
+            item.folderPath,
+            ...item.reasons
+          ].filter(Boolean).some((value) =>
+            String(value).toLocaleLowerCase().includes(query)
+          );
+        });
+        renderAnomalyResources(filteredAnomalies, query, folderPath);
+        return;
+      }
+
+      previewSubtitle.textContent = `${currentPlan.rootName} · ${selectedFolders.size} 个已选文件夹`;
+      if (previewFilter === 'componentSets') {
+        const filteredGroups = componentSetGroups.filter((group) => {
+          if (folderPath && group.folderPath !== folderPath) return false;
+          if (!query) return true;
+          return [
+            group.name,
+            group.folderPath,
+            group.variantProperty,
+            ...group.members.flatMap((member) => [member.name, member.relativePath])
+          ].filter(Boolean).some((value) => String(value).toLocaleLowerCase().includes(query));
+        });
+        renderComponentSetGroups(filteredGroups, query, folderPath);
+        return;
+      }
+
       const filtered = selectedActions.filter((action) => {
         const typeMatches = previewFilter === 'changes'
           ? action.type !== 'unchanged'
@@ -1384,16 +1735,350 @@
       previewLoadMore.textContent = `继续加载 ${Math.min(PREVIEW_PAGE_SIZE, filtered.length - visibleActions.length)} 项`;
     }
 
-    function updatePreviewTabs(counts) {
+    function updatePreviewTabs(counts, componentSetCount, anomalyCount) {
       const changeCount = counts.add + counts.update + counts.delete + counts.move + counts.conflict;
       for (const tab of previewTabs.querySelectorAll('[data-preview-filter]')) {
         const type = tab.dataset.previewFilter;
-        const count = type === 'changes' ? changeCount : (counts[type] || 0);
+        const count = type === 'changes'
+          ? changeCount
+          : (type === 'componentSets'
+            ? componentSetCount
+            : (type === 'anomalies' ? anomalyCount : (counts[type] || 0)));
         const countElement = tab.querySelector('.tab-count');
         if (countElement) countElement.textContent = count;
         tab.classList.toggle('active', type === previewFilter);
         tab.setAttribute('aria-pressed', type === previewFilter ? 'true' : 'false');
       }
+    }
+
+    function renderAnomalyResources(items, query, folderPath) {
+      const visibleItems = items.slice(0, previewRenderLimit);
+      const fragment = document.createDocumentFragment();
+      for (const item of visibleItems) fragment.appendChild(createAnomalyRow(item));
+      previewList.replaceChildren(fragment);
+
+      if (items.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'preview-empty';
+        const title = document.createElement('strong');
+        title.textContent = query || folderPath
+          ? '没有符合筛选条件的异常资源'
+          : '没有发现明显异常资源';
+        const detail = document.createElement('span');
+        detail.textContent = query || folderPath
+          ? '可以清空搜索或切换本地文件夹后再查看。'
+          : `已检查 ${currentLocalResourceCount} 个本地 PNG，未发现明显的元数据或体积异常。`;
+        empty.append(title, detail);
+        previewList.appendChild(empty);
+      }
+
+      const totalBytes = items.reduce((sum, item) => sum + item.sourceSize, 0);
+      const metadataBytes = items.reduce((sum, item) => sum + item.metadataBytes, 0);
+      previewResultCount.textContent = `${items.length} 个异常资源`;
+      previewRenderCount.textContent = items.length > 0
+        ? `合计 ${formatFileSize(totalBytes)} · 元数据 ${formatFileSize(metadataBytes)}`
+        : '显示 0 项';
+      previewLoadMore.hidden = visibleItems.length >= items.length;
+      previewLoadMore.textContent =
+        `继续加载 ${Math.min(PREVIEW_PAGE_SIZE, items.length - visibleItems.length)} 项`;
+    }
+
+    function createAnomalyRow(item) {
+      const row = document.createElement('article');
+      row.className = `anomaly-row ${item.severity === 'high' ? 'high' : 'review'}`;
+
+      const top = document.createElement('div');
+      top.className = 'anomaly-top';
+      const level = document.createElement('span');
+      level.className = 'anomaly-level';
+      level.textContent = item.severity === 'high' ? '高风险' : '需检查';
+      const name = document.createElement('div');
+      name.className = 'anomaly-name';
+      name.textContent = item.name || basenameFromPath(item.relativePath);
+      const size = document.createElement('span');
+      size.className = 'anomaly-size';
+      size.textContent = formatFileSize(item.sourceSize);
+      top.append(level, name, size);
+
+      const path = document.createElement('div');
+      path.className = 'anomaly-path';
+      path.textContent = item.relativePath;
+
+      const metrics = document.createElement('div');
+      metrics.className = 'anomaly-metrics';
+      const metricLabels = [
+        formatDimensions(item.width, item.height),
+        `单位像素 ${formatRatio(item.bytesPerPixel)} B`,
+        item.medianSize > 0 ? `同尺寸中位数 ${formatFileSize(item.medianSize)}` : '',
+        item.metadataBytes > 0
+          ? `元数据 ${formatFileSize(item.metadataBytes)} / ${Math.round(item.metadataRatio * 100)}%`
+          : ''
+      ].filter(Boolean);
+      for (const label of metricLabels) {
+        const metric = document.createElement('span');
+        metric.className = 'anomaly-metric';
+        metric.textContent = label;
+        metrics.appendChild(metric);
+      }
+
+      const reasons = document.createElement('div');
+      reasons.className = 'anomaly-reasons';
+      const chunkSummary = item.metadataChunks
+        .slice(0, 3)
+        .map((chunk) => `${chunk.type} ${formatFileSize(chunk.bytes)}`)
+        .join(' · ');
+      reasons.textContent = [
+        item.reasons.join('；'),
+        chunkSummary ? `区块：${chunkSummary}` : ''
+      ].filter(Boolean).join(' · ');
+      row.append(top, path, metrics, reasons);
+      return row;
+    }
+
+    function buildChangedComponentSetGroups(actions) {
+      const groups = new Map();
+      const affectedTypes = new Set(['add', 'update', 'delete', 'move']);
+      const previousSetActions = actions.filter((action) =>
+        affectedTypes.has(action.type) && action.previousComponentSetId
+      );
+
+      for (const action of actions) {
+        if (!action.componentSetKey || action.type === 'delete' || action.type === 'conflict') continue;
+        const id = `${action.folderPath}\u0000${action.componentSetKey}`;
+        if (!groups.has(id)) {
+          groups.set(id, {
+            id,
+            folderPath: action.folderPath,
+            key: action.componentSetKey,
+            name: action.componentSetName || action.componentSetKey,
+            variantProperty: action.variantProperty || 'Property 1',
+            members: [],
+            directActions: new Set(),
+            stablePreviousSetIds: new Set(),
+            allPreviousSetIds: new Set()
+          });
+        }
+        const group = groups.get(id);
+        group.members.push({
+          relativePath: action.relativePath,
+          name: action.name,
+          width: action.width,
+          height: action.height,
+          changeType: action.type
+        });
+        if (affectedTypes.has(action.type)) group.directActions.add(action);
+        if (action.previousComponentSetId) {
+          group.allPreviousSetIds.add(action.previousComponentSetId);
+          if (action.type === 'unchanged') {
+            group.stablePreviousSetIds.add(action.previousComponentSetId);
+          }
+        }
+      }
+
+      const result = [];
+      for (const group of groups.values()) {
+        const previousSetIds = group.stablePreviousSetIds.size > 0
+          ? group.stablePreviousSetIds
+          : group.allPreviousSetIds;
+        const affectedActions = new Set(group.directActions);
+        for (const action of previousSetActions) {
+          if (previousSetIds.has(action.previousComponentSetId)) affectedActions.add(action);
+        }
+        if (affectedActions.size === 0) continue;
+
+        const changeCounts = { add: 0, update: 0, delete: 0, move: 0 };
+        for (const action of affectedActions) {
+          if (Object.prototype.hasOwnProperty.call(changeCounts, action.type)) {
+            changeCounts[action.type]++;
+          }
+        }
+        group.members.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+        result.push({
+          id: group.id,
+          folderPath: group.folderPath,
+          key: group.key,
+          name: group.name,
+          variantProperty: group.variantProperty,
+          members: group.members,
+          changeCounts,
+          changedCount: affectedActions.size
+        });
+      }
+      return result.sort((a, b) =>
+        a.folderPath.localeCompare(b.folderPath) || a.name.localeCompare(b.name)
+      );
+    }
+
+    function renderComponentSetGroups(groups, query, folderPath) {
+      const fragment = document.createDocumentFragment();
+      for (const group of groups) fragment.appendChild(createComponentSetCard(group));
+      previewList.replaceChildren(fragment);
+
+      if (groups.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'preview-empty';
+        const title = document.createElement('strong');
+        title.textContent = query || folderPath ? '没有符合筛选条件的组件集' : '没有发生变化的组件集';
+        const detail = document.createElement('span');
+        detail.textContent = query || folderPath
+          ? '可以清空搜索或切换文件夹后再查看。'
+          : '本次同步不会改变任何 Component Set。';
+        empty.append(title, detail);
+        previewList.appendChild(empty);
+      }
+
+      previewResultCount.textContent = `${groups.length} 个组件集`;
+      previewRenderCount.textContent = groups.length > 0 ? '标题默认收起' : '显示 0 项';
+      previewLoadMore.hidden = true;
+    }
+
+    function createComponentSetCard(group) {
+      const details = document.createElement('details');
+      details.className = 'component-set-card';
+
+      const summary = document.createElement('summary');
+      const chevron = document.createElement('span');
+      chevron.className = 'component-set-chevron';
+      chevron.textContent = '›';
+      const heading = document.createElement('div');
+      heading.className = 'component-set-heading';
+      const name = document.createElement('div');
+      name.className = 'component-set-name';
+      name.textContent = group.name;
+      const meta = document.createElement('div');
+      meta.className = 'component-set-meta';
+      meta.textContent = `${group.folderPath} / ${group.variantProperty}`;
+      heading.append(name, meta);
+      const count = document.createElement('span');
+      count.className = 'component-set-count';
+      count.textContent = `${group.members.length} 个`;
+      summary.append(chevron, heading, count);
+      details.appendChild(summary);
+
+      const objectUrls = [];
+      details.addEventListener('toggle', () => {
+        const existingBody = details.querySelector('.component-set-body');
+        if (!details.open) {
+          releaseObjectUrls(objectUrls);
+          if (existingBody) existingBody.remove();
+          return;
+        }
+        if (existingBody) return;
+        const body = document.createElement('div');
+        body.className = 'component-set-body';
+        details.appendChild(body);
+        renderComponentSetMembers(group, body, objectUrls, COMPONENT_MEMBER_PAGE_SIZE);
+      });
+      return details;
+    }
+
+    function renderComponentSetMembers(group, body, objectUrls, limit) {
+      releaseObjectUrls(objectUrls);
+      const chips = document.createElement('div');
+      chips.className = 'component-set-changes';
+      const resultChip = document.createElement('span');
+      resultChip.className = 'component-set-change-chip';
+      resultChip.textContent = `同步后 ${group.members.length} 个组件`;
+      chips.appendChild(resultChip);
+      for (const type of ['add', 'update', 'delete', 'move']) {
+        const count = group.changeCounts[type] || 0;
+        if (!count) continue;
+        const chip = document.createElement('span');
+        chip.className = 'component-set-change-chip';
+        chip.textContent = `${changeTypeLabel(type)} ${count}`;
+        chips.appendChild(chip);
+      }
+
+      const members = document.createElement('div');
+      members.className = 'component-members';
+      const visibleMembers = group.members.slice(0, limit);
+      for (const member of visibleMembers) {
+        members.appendChild(createComponentMember(member, objectUrls));
+      }
+      body.replaceChildren(chips, members);
+
+      if (visibleMembers.length < group.members.length) {
+        const more = document.createElement('button');
+        more.className = 'component-members-more';
+        more.type = 'button';
+        more.textContent = `继续加载 ${Math.min(COMPONENT_MEMBER_PAGE_SIZE, group.members.length - visibleMembers.length)} 个组件`;
+        more.addEventListener('click', () => {
+          renderComponentSetMembers(
+            group,
+            body,
+            objectUrls,
+            Math.min(group.members.length, limit + COMPONENT_MEMBER_PAGE_SIZE)
+          );
+        });
+        body.appendChild(more);
+      }
+    }
+
+    function createComponentMember(member, objectUrls) {
+      const card = document.createElement('div');
+      card.className = 'component-member';
+      card.title = member.relativePath;
+      const thumb = document.createElement('div');
+      thumb.className = 'component-thumb';
+      const file = fileByPath.get(member.relativePath);
+      let previewReady = false;
+      if (file && typeof URL.createObjectURL === 'function') {
+        try {
+          const objectUrl = URL.createObjectURL(file);
+          previewObjectUrls.add(objectUrl);
+          objectUrls.push(objectUrl);
+          const image = document.createElement('img');
+          image.src = objectUrl;
+          image.alt = member.name || basenameFromPath(member.relativePath);
+          image.loading = 'lazy';
+          image.decoding = 'async';
+          image.addEventListener('error', () => {
+            releaseObjectUrl(objectUrl);
+            image.replaceWith(createThumbnailPlaceholder('图片读取失败'));
+          }, { once: true });
+          thumb.appendChild(image);
+          previewReady = true;
+        } catch (_) {
+          previewReady = false;
+        }
+      }
+      if (!previewReady) thumb.appendChild(createThumbnailPlaceholder('无本地预览'));
+
+      const name = document.createElement('div');
+      name.className = 'component-member-name';
+      name.textContent = member.name || basenameFromPath(member.relativePath);
+      const meta = document.createElement('div');
+      meta.className = 'component-member-meta';
+      meta.textContent = formatDimensions(member.width, member.height) || member.relativePath;
+      const change = document.createElement('span');
+      const changeType = ['add', 'update', 'move'].includes(member.changeType)
+        ? member.changeType
+        : 'unchanged';
+      change.className = `component-member-change ${changeType}`;
+      change.textContent = changeType === 'unchanged' ? '保留' : changeTypeLabel(changeType);
+      card.append(thumb, name, meta, change);
+      return card;
+    }
+
+    function createThumbnailPlaceholder(message) {
+      const placeholder = document.createElement('span');
+      placeholder.className = 'component-thumb-placeholder';
+      placeholder.textContent = message;
+      return placeholder;
+    }
+
+    function releaseObjectUrl(objectUrl) {
+      if (!previewObjectUrls.has(objectUrl)) return;
+      URL.revokeObjectURL(objectUrl);
+      previewObjectUrls.delete(objectUrl);
+    }
+
+    function releaseObjectUrls(objectUrls) {
+      for (const objectUrl of objectUrls.splice(0)) releaseObjectUrl(objectUrl);
+    }
+
+    function releasePreviewObjectUrls() {
+      for (const objectUrl of Array.from(previewObjectUrls)) releaseObjectUrl(objectUrl);
     }
 
     function createChangeRow(action) {
@@ -1904,6 +2589,180 @@
       return { width, height };
     }
 
+    async function analyzeLocalResourceAnomalies(entries, files, onProgress) {
+      const groups = new Map();
+      for (const entry of entries) {
+        const key = `${entry.width}x${entry.height}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(Number(entry.sourceSize) || 0);
+      }
+
+      const groupStats = new Map();
+      for (const [key, sizes] of groups) {
+        const sorted = sizes.slice().sort((a, b) => a - b);
+        const middle = Math.floor(sorted.length / 2);
+        const median = sorted.length % 2
+          ? sorted[middle]
+          : (sorted[middle - 1] + sorted[middle]) / 2;
+        groupStats.set(key, { count: sorted.length, median });
+      }
+
+      const candidates = [];
+      for (const entry of entries) {
+        const sourceSize = Number(entry.sourceSize) || 0;
+        const pixels = Math.max(1, Number(entry.width) * Number(entry.height));
+        const bytesPerPixel = sourceSize / pixels;
+        const stats = groupStats.get(`${entry.width}x${entry.height}`) || {
+          count: 1,
+          median: sourceSize
+        };
+        const sizeRatio = stats.median > 0 ? sourceSize / stats.median : 1;
+        const relativeOutlier =
+          stats.count >= 3 &&
+          sizeRatio >= ANOMALY_OUTLIER_RATIO &&
+          sourceSize - stats.median >= ANOMALY_OUTLIER_EXCESS_BYTES;
+        const bppOutlier =
+          sourceSize >= ANOMALY_BPP_MIN_BYTES &&
+          bytesPerPixel >= ANOMALY_BPP;
+        const shouldInspect =
+          sourceSize >= ANOMALY_METADATA_BYTES ||
+          relativeOutlier ||
+          bppOutlier;
+        if (!shouldInspect) continue;
+        candidates.push({
+          entry,
+          sourceSize,
+          bytesPerPixel,
+          medianSize: stats.median,
+          sizeRatio,
+          relativeOutlier,
+          bppOutlier
+        });
+      }
+
+      const diagnostics = [];
+      let completed = 0;
+      if (typeof onProgress === 'function') onProgress(0, candidates.length);
+      await mapWithConcurrency(candidates, ANOMALY_READ_CONCURRENCY, async (candidate) => {
+        const { entry, sourceSize } = candidate;
+        const file = files.get(entry.relativePath);
+        let chunkProfile = null;
+        let parseError = '';
+        try {
+          if (!file) throw new Error('找不到本地文件');
+          chunkProfile = parsePngChunkProfile(await file.arrayBuffer());
+        } catch (error) {
+          parseError = error && error.message ? error.message : String(error);
+        }
+
+        const metadataBytes = chunkProfile ? chunkProfile.metadataBytes : 0;
+        const metadataRatio = sourceSize > 0 ? metadataBytes / sourceSize : 0;
+        const metadataAnomaly =
+          metadataBytes >= ANOMALY_METADATA_BYTES ||
+          (metadataBytes >= ANOMALY_METADATA_RATIO_BYTES &&
+            metadataRatio >= ANOMALY_METADATA_RATIO);
+        const veryLarge = sourceSize >= ANOMALY_LARGE_FILE_BYTES;
+        const reasons = [];
+
+        if (parseError) reasons.push(`PNG 区块读取异常：${parseError}`);
+        if (metadataAnomaly) {
+          reasons.push(
+            `元数据占用 ${formatFileSize(metadataBytes)}（${Math.round(metadataRatio * 100)}%）`
+          );
+        }
+        if (candidate.relativeOutlier) {
+          reasons.push(`同尺寸资源中位数的 ${formatRatio(candidate.sizeRatio)} 倍`);
+        }
+        if (candidate.bppOutlier) {
+          reasons.push(`单位像素 ${formatRatio(candidate.bytesPerPixel)} B`);
+        }
+        if (veryLarge && reasons.length === 0) reasons.push('文件超过 5 MB，建议人工确认');
+
+        if (reasons.length > 0) {
+          diagnostics.push({
+            relativePath: entry.relativePath,
+            folderPath: entry.folderPath,
+            name: entry.name,
+            width: entry.width,
+            height: entry.height,
+            sourceSize,
+            bytesPerPixel: candidate.bytesPerPixel,
+            medianSize: candidate.medianSize,
+            sizeRatio: candidate.sizeRatio,
+            metadataBytes,
+            metadataRatio,
+            metadataChunks: chunkProfile ? chunkProfile.metadataChunks : [],
+            severity: parseError || metadataAnomaly ? 'high' : 'review',
+            reasons
+          });
+        }
+
+        completed++;
+        if (typeof onProgress === 'function') onProgress(completed, candidates.length);
+      });
+
+      return diagnostics.sort((a, b) =>
+        b.sourceSize - a.sourceSize ||
+        a.relativePath.localeCompare(b.relativePath)
+      );
+    }
+
+    function parsePngChunkProfile(buffer) {
+      const bytes = new Uint8Array(buffer);
+      const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+      if (bytes.length < 20 || !signature.every((value, index) => bytes[index] === value)) {
+        throw new Error('不是有效的 PNG 文件');
+      }
+
+      const metadataTypes = new Set(['iTXt', 'tEXt', 'zTXt', 'eXIf', 'iCCP']);
+      const metadataChunks = [];
+      let metadataBytes = 0;
+      let idatBytes = 0;
+      let offset = 8;
+      let foundEnd = false;
+
+      while (offset + 12 <= bytes.length) {
+        const view = new DataView(buffer, offset, 8);
+        const length = view.getUint32(0, false);
+        const type = String.fromCharCode(
+          bytes[offset + 4],
+          bytes[offset + 5],
+          bytes[offset + 6],
+          bytes[offset + 7]
+        );
+        const chunkBytes = length + 12;
+        if (offset + chunkBytes > bytes.length) {
+          throw new Error(`${type || '未知'} 区块长度超出文件范围`);
+        }
+        if (type === 'IDAT') idatBytes += chunkBytes;
+        if (metadataTypes.has(type)) {
+          metadataBytes += chunkBytes;
+          metadataChunks.push({ type, bytes: chunkBytes });
+        }
+        offset += chunkBytes;
+        if (type === 'IEND') {
+          foundEnd = true;
+          break;
+        }
+      }
+
+      if (!foundEnd) throw new Error('缺少 IEND 结束区块');
+      metadataChunks.sort((a, b) => b.bytes - a.bytes);
+      return { metadataBytes, metadataChunks, idatBytes };
+    }
+
+    function formatFileSize(bytes) {
+      const value = Math.max(0, Number(bytes) || 0);
+      if (value < 1024) return `${Math.round(value)} B`;
+      if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+      return `${(value / (1024 * 1024)).toFixed(value < 100 * 1024 * 1024 ? 1 : 0)} MB`;
+    }
+
+    function formatRatio(value) {
+      const numeric = Number(value) || 0;
+      return numeric >= 100 ? Math.round(numeric).toString() : numeric.toFixed(numeric >= 10 ? 1 : 2);
+    }
+
     function formatDuration(milliseconds) {
       const value = Number(milliseconds) || 0;
       return value < 1000 ? `${Math.round(value)}ms` : `${(value / 1000).toFixed(1)}s`;
@@ -2024,6 +2883,8 @@
       closeChangePreview(false);
       currentPlan = null;
       currentManifest = [];
+      currentLocalResourceCount = 0;
+      localResourceDiagnostics = [];
       currentRootName = '';
       syncComplete = false;
       selectedFolders = new Set();

@@ -287,18 +287,29 @@ test('same-size replacement updates only the target image and preserves position
   const runtime = createRuntime();
   const original = [
     asset('icons/home.png', 'icons', 'home', 'h-home', 24, 24),
-    asset('icons/search.png', 'icons', 'search', 'h-search', 24, 24)
+    asset('icons/search.png', 'icons', 'search', 'h-search', 24, 24),
+    asset('weather/sun.png', 'weather', 'sun', 'h-sun', 32, 32)
   ];
   await importAll(runtime, original);
 
   const before = runtime.componentSnapshot();
+  const sectionPositions = ['icons', 'weather'].map((folder) => {
+    const section = runtime.section(folder);
+    return { id: section.id, x: section.x, y: section.y };
+  });
   const changed = [
     asset('icons/home.png', 'icons', 'home', 'h-home-v2', 24, 24),
-    original[1]
+    original[1],
+    original[2]
   ];
   const prepared = await runtime.send('prepare-sync', { rootName: 'library', manifest: changed });
   assert.equal(prepared.summary.update, 1);
-  assert.equal(prepared.summary.unchanged, 1);
+  assert.equal(prepared.summary.unchanged, 2);
+  const previewAction = prepared.actions.find((action) => action.type === 'update');
+  assert.equal(previewAction.componentSetKey, '24x24');
+  assert.equal(previewAction.componentSetName, '24x24');
+  assert.equal(previewAction.variantProperty, 'Property 1');
+  assert.ok(previewAction.previousComponentSetId);
 
   const componentSet = runtime.section('icons').children.find((node) => node.type === 'COMPONENT_SET');
   let componentSetResizeCount = 0;
@@ -308,7 +319,7 @@ test('same-size replacement updates only the target image and preserves position
     originalResize(width, height);
   };
 
-  await runtime.send('begin-sync', { selectedFolders: ['icons'], deleteMissing: true });
+  await runtime.send('begin-sync', { selectedFolders: ['icons', 'weather'], deleteMissing: true });
   await runtime.apply('icons/home.png', 24, 24);
   await runtime.send('finish-sync', {});
 
@@ -319,6 +330,14 @@ test('same-size replacement updates only the target image and preserves position
   );
   assert.equal(runtime.component('icons/home.png').meta.hash, 'h-home-v2');
   assert.equal(componentSetResizeCount, 0, 'content-only updates should not relayout the Component Set');
+  assert.deepEqual(
+    ['icons', 'weather'].map((folder) => {
+      const section = runtime.section(folder);
+      return { id: section.id, x: section.x, y: section.y };
+    }),
+    sectionPositions,
+    'content-only updates should not relayout managed Sections'
+  );
 });
 
 test('a newer same-name resource in the same Section replaces the old path and keeps the node id', async () => {
@@ -552,12 +571,11 @@ test('add and delete inside one component set leave unchanged variants in place'
   assert.ok(runtime.component('icons/settings.png'));
 });
 
-test('new folder creates a new section without moving existing sections', async () => {
+test('new folder reflows managed Sections into one page-level layout', async () => {
   const runtime = createRuntime();
   const original = [asset('icons/home.png', 'icons', 'home', 'h-home', 24, 24)];
   await importAll(runtime, original);
   const existing = runtime.section('icons');
-  const oldPosition = { x: existing.x, y: existing.y };
 
   const next = [
     ...original,
@@ -570,8 +588,9 @@ test('new folder creates a new section without moving existing sections', async 
   await runtime.apply('weather/sun.png', 32, 32);
   await runtime.send('finish-sync', {});
 
-  assert.deepEqual({ x: existing.x, y: existing.y }, oldPosition);
-  assert.ok(runtime.section('weather'));
+  const weather = runtime.section('weather');
+  assert.ok(weather);
+  assertNoOverlap([existing, weather], 200);
 });
 
 test('nested directories share one Section named after the first-level folder', async () => {
@@ -734,7 +753,7 @@ test('a unique legacy same-name Component is replaced even when its dimensions c
   assert.equal(after.node.height, 32);
 });
 
-test('a unique empty same-name Section is reused and its manual content is preserved', async () => {
+test('a unique empty same-name Section is reused and its manual content is preserved at the content margin', async () => {
   const runtime = createRuntime();
   const existing = runtime.createLegacyFolder('common', []);
   const manualNode = runtime.figma.createRectangle();
@@ -742,7 +761,6 @@ test('a unique empty same-name Section is reused and its manual content is prese
   manualNode.x = 48;
   manualNode.y = 156;
   manualNode.resizeWithoutConstraints(80, 40);
-  const manualPosition = { x: manualNode.x, y: manualNode.y };
   existing.section.appendChild(manualNode);
   const manifest = [asset('common/icons/home.png', 'common', 'home', 'h-home', 24, 24)];
 
@@ -755,7 +773,7 @@ test('a unique empty same-name Section is reused and its manual content is prese
   assert.equal(runtime.section('common').id, existing.section.id);
   assert.equal(manualNode.parent.id, existing.section.id);
   assert.equal(manualNode.removed, false);
-  assert.deepEqual({ x: manualNode.x, y: manualNode.y }, manualPosition);
+  assert.deepEqual({ x: manualNode.x, y: manualNode.y }, { x: 192, y: 272 });
   assertNoOverlap(existing.section.children, 0);
 });
 
@@ -905,7 +923,147 @@ test('mixed-size Component Sets are compactly packed with doubled Section margin
   assert.ok(occupiedArea / contentArea >= 0.55, `Section content fill was ${occupiedArea / contentArea}`);
   assert.equal(section.width, Math.max(360, ...componentSets.map((node) => node.x + node.width + 192)));
   assert.equal(section.height, Math.max(320, ...componentSets.map((node) => node.y + node.height + 192)));
-  assert.ok(aspectRatio(section) <= 1.8, `Section ratio was ${aspectRatio(section)}`);
+  assert.ok(aspectRatio(section) <= 1.3, `Section ratio was ${aspectRatio(section)}`);
+
+  const rows = new Map();
+  for (const node of componentSets) {
+    const rowKey = Math.round(node.y * 100) / 100;
+    if (!rows.has(rowKey)) rows.set(rowKey, []);
+    rows.get(rowKey).push(node);
+  }
+  assert.ok(rows.size >= 2);
+  for (const row of rows.values()) {
+    const rowLeft = Math.min(...row.map((node) => node.x));
+    assert.equal(rowLeft, 192, 'Each Section shelf should align to the left content edge');
+  }
+});
+
+test('managed Section content with legacy leading whitespace is repaired to the top-left', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('icons/home.png', 'icons', 'home', 'h-home', 24, 24),
+    asset('icons/search.png', 'icons', 'search', 'h-search', 24, 24),
+    asset('icons/settings.png', 'icons', 'settings', 'h-settings', 32, 32)
+  ];
+  await importAll(runtime, manifest);
+
+  const section = runtime.section('icons');
+  for (const child of section.children) child.x += 4064;
+  const maxRight = Math.max(...section.children.map((node) => node.x + node.width));
+  const maxBottom = Math.max(...section.children.map((node) => node.y + node.height));
+  section.resizeWithoutConstraints(maxRight + 192, maxBottom + 192);
+
+  const prepared = await runtime.send('prepare-sync', { rootName: 'library', manifest });
+  assert.equal(prepared.summary.move, 1);
+  await runtime.send('begin-sync', { selectedFolders: ['icons'], deleteMissing: true });
+  await runtime.send('finish-sync', {});
+
+  assert.equal(Math.min(...section.children.map((node) => node.x)), 192);
+  assert.equal(Math.min(...section.children.map((node) => node.y)), 272);
+  assert.equal(section.width, Math.max(...section.children.map((node) => node.x + node.width)) + 192);
+});
+
+test('a hierarchical legacy Component name is adopted and keeps its node id', async () => {
+  const runtime = createRuntime();
+  const original = [
+    asset('icon/home.png', 'icon', 'home', 'h-home', 24, 24),
+    asset('icon/search.png', 'icon', 'search', 'h-search', 24, 24)
+  ];
+  await importAll(runtime, original);
+
+  const section = runtime.section('icon');
+  const legacy = runtime.figma.createComponent();
+  legacy.name = '80x80/Variant134';
+  legacy.resizeWithoutConstraints(80, 80);
+  const rectangle = runtime.figma.createRectangle();
+  rectangle.name = 'Variant134';
+  rectangle.resizeWithoutConstraints(80, 80);
+  legacy.appendChild(rectangle);
+  section.appendChild(legacy);
+  legacy.x = 4256;
+  legacy.y = 4332;
+  const legacyId = legacy.id;
+
+  const replacement = asset('icon/Variant134.png', 'icon', 'Variant134', 'h-134', 80, 80);
+  const manifest = [...original, replacement];
+  const prepared = await runtime.send('prepare-sync', { rootName: 'library', manifest });
+  assert.equal(prepared.summary.add, 0);
+  assert.equal(prepared.summary.update, 1);
+
+  await runtime.send('begin-sync', { selectedFolders: ['icon'], deleteMissing: true });
+  await runtime.apply(replacement.relativePath, 80, 80);
+  await runtime.send('finish-sync', {});
+
+  const adopted = runtime.component(replacement.relativePath);
+  assert.ok(adopted);
+  assert.equal(adopted.node.id, legacyId);
+  assert.equal(adopted.node.name, 'Variant134');
+  assert.equal(Math.min(...section.children.map((node) => node.x)), 192);
+  assert.equal(Math.min(...section.children.map((node) => node.y)), 272);
+  assertNoOverlap(section.children, 100);
+});
+
+test('an unmanaged direct Component participates in compact Section packing', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('icon/home.png', 'icon', 'home', 'h-home', 24, 24),
+    asset('icon/search.png', 'icon', 'search', 'h-search', 24, 24),
+    asset('icon/settings.png', 'icon', 'settings', 'h-settings', 32, 32)
+  ];
+  await importAll(runtime, manifest);
+
+  const section = runtime.section('icon');
+  for (const child of section.children) child.x += 4244;
+  const manual = runtime.figma.createComponent();
+  manual.name = 'Manual note';
+  manual.resizeWithoutConstraints(80, 80);
+  section.appendChild(manual);
+  manual.x = 4256;
+  manual.y = 4332;
+  section.resizeWithoutConstraints(5200, 4800);
+
+  const prepared = await runtime.send('prepare-sync', { rootName: 'library', manifest });
+  assert.equal(prepared.summary.move, 1);
+  await runtime.send('begin-sync', { selectedFolders: ['icon'], deleteMissing: true });
+  await runtime.send('finish-sync', {});
+
+  assert.equal(Math.min(...section.children.map((node) => node.x)), 192);
+  assert.equal(Math.min(...section.children.map((node) => node.y)), 272);
+  assert.equal(section.width, Math.max(...section.children.map((node) => node.x + node.width)) + 192);
+  assert.ok(section.width < 1400, `Section width remained ${section.width}`);
+  assert.ok(section.height < 1400, `Section height remained ${section.height}`);
+  assert.ok(manual.x < 1000 && manual.y < 1000, `Unmanaged Component remained at ${manual.x}, ${manual.y}`);
+  assertNoOverlap(section.children, 100);
+});
+
+test('a selected malformed Section is repaired even when its child metadata is missing', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('icon/home.png', 'icon', 'home', 'h-home', 24, 24),
+    asset('icon/search.png', 'icon', 'search', 'h-search', 24, 24),
+    asset('icon/settings.png', 'icon', 'settings', 'h-settings', 32, 32)
+  ];
+  await importAll(runtime, manifest);
+
+  const section = runtime.section('icon');
+  for (const child of section.children) {
+    child.x += 4244;
+    child.setPluginData(META_KEY, '');
+    if (child.type === 'COMPONENT_SET') {
+      for (const component of child.children) component.setPluginData(META_KEY, '');
+    }
+  }
+  section.resizeWithoutConstraints(5200, 4800);
+
+  const prepared = await runtime.send('prepare-sync', { rootName: 'library', manifest });
+  assert.ok(prepared.actions.some((action) => action.layoutOnly === true));
+  await runtime.send('begin-sync', { selectedFolders: ['icon'], deleteMissing: true });
+  await runtime.send('finish-sync', {});
+
+  assert.equal(Math.min(...section.children.map((node) => node.x)), 192);
+  assert.equal(Math.min(...section.children.map((node) => node.y)), 272);
+  assert.ok(section.width < 1400, `Section width remained ${section.width}`);
+  assert.ok(section.height < 1400, `Section height remained ${section.height}`);
 });
 
 test('an unchanged but malformed layout is exposed as one repair move and fixed on resync', async () => {
@@ -936,22 +1094,79 @@ test('an unchanged but malformed layout is exposed as one repair move and fixed 
   assert.equal(section.height, Math.max(320, ...section.children.map((node) => node.y + node.height + 192)));
 });
 
-test('multiple newly created Sections use a compact grid instead of transient import dimensions', async () => {
+test('managed Sections use area-based compact packing while manual Sections stay fixed', async () => {
   const runtime = createRuntime();
-  const folders = ['common', 'battle', 'weather', 'navigation'];
-  const manifest = folders.map((folder, index) =>
-    asset(`${folder}/icon.png`, folder, `icon-${index}`, `h-${index}`, 24, 24)
-  );
+  const manualSection = runtime.figma.createSection();
+  manualSection.name = 'Manual Notes';
+  manualSection.x = -900;
+  manualSection.y = 240;
+  manualSection.resizeWithoutConstraints(520, 420);
+  const manualPosition = { x: manualSection.x, y: manualSection.y };
+  const specs = [
+    { folder: 'battle', width: 48, height: 48, count: 16 },
+    { folder: 'common', width: 24, height: 24, count: 1 },
+    { folder: 'item', width: 80, height: 80, count: 4 },
+    { folder: 'navigation', width: 64, height: 32, count: 8 },
+    { folder: 'weather', width: 32, height: 64, count: 9 },
+    { folder: 'world', width: 16, height: 16, count: 2 }
+  ];
+  const manifest = specs.flatMap((spec) => Array.from({ length: spec.count }, (_, index) =>
+    asset(
+      `${spec.folder}/icon-${index}.png`,
+      spec.folder,
+      `icon-${index}`,
+      `h-${spec.folder}-${index}`,
+      spec.width,
+      spec.height
+    )
+  ));
   await importAll(runtime, manifest);
 
-  const sections = folders.map((folder) => runtime.section(folder));
-  assertNoOverlap(sections, 80);
+  const sections = specs.map((spec) => runtime.section(spec.folder));
+  assert.deepEqual({ x: manualSection.x, y: manualSection.y }, manualPosition);
+  assertNoOverlap(sections, 200);
+  assertNoOverlap([manualSection, ...sections], 200);
   const minX = Math.min(...sections.map((section) => section.x));
   const minY = Math.min(...sections.map((section) => section.y));
   const maxRight = Math.max(...sections.map((section) => section.x + section.width));
   const maxBottom = Math.max(...sections.map((section) => section.y + section.height));
   const bounds = { width: maxRight - minX, height: maxBottom - minY };
-  assert.ok(aspectRatio(bounds) <= 1.3, `New Section grid ratio was ${aspectRatio(bounds)}`);
+  assert.ok(aspectRatio(bounds) <= 1.8, `Managed Section grid ratio was ${aspectRatio(bounds)}`);
+
+  const firstSection = sections.slice().sort((a, b) =>
+    (a.y - b.y) ||
+    (a.x - b.x)
+  )[0];
+  const largestSection = sections.slice().sort((a, b) =>
+    (b.width * b.height - a.width * a.height) ||
+    a.name.localeCompare(b.name)
+  )[0];
+  assert.equal(firstSection.id, largestSection.id, 'The largest Section should anchor the top-left');
+
+  const occupiedArea = sections.reduce((sum, section) => sum + section.width * section.height, 0);
+  assert.ok(
+    occupiedArea / (bounds.width * bounds.height) >= 0.54,
+    `Managed Section fill was ${occupiedArea / (bounds.width * bounds.height)}`
+  );
+});
+
+test('page-level MaxRects packing backfills a smaller Section into an earlier empty area', () => {
+  const runtime = createRuntime();
+  const rectangles = [
+    { name: 'tall', width: 500, height: 1000 },
+    { name: 'wide-a', width: 700, height: 400 },
+    { name: 'wide-b', width: 700, height: 400 }
+  ];
+  const packed = runtime.packSectionsAtWidth(rectangles, 1700, 200);
+  const tall = packed.find((rectangle) => rectangle.name === 'tall');
+  const firstWide = packed.find((rectangle) => rectangle.name === 'wide-a');
+  const secondWide = packed.find((rectangle) => rectangle.name === 'wide-b');
+
+  assert.deepEqual({ x: tall.x, y: tall.y }, { x: 0, y: 0 });
+  assert.deepEqual({ x: firstWide.x, y: firstWide.y }, { x: 700, y: 0 });
+  assert.deepEqual({ x: secondWide.x, y: secondWide.y }, { x: 700, y: 600 });
+  assert.ok(secondWide.y + secondWide.height <= tall.y + tall.height);
+  assertNoOverlap(packed, 200);
 });
 
 test('large legacy libraries are indexed without quadratic matching', async () => {
@@ -1106,11 +1321,15 @@ test('MCP classification request round-trips through shared plugin data and appl
   assert.match(published.prompt, new RegExp(`当前页面链接：${request.pageUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.match(published.prompt, /页面名称：Page 1/);
   assert.match(published.prompt, /固定使用资源名作为 Variant 值/);
-  assert.match(published.prompt, /必须做双向审核/);
+  assert.match(published.prompt, /尺寸权重最高/);
+  assert.match(published.prompt, /先审核 request\.strictGroups/);
   assert.match(published.prompt, /合并跨尺寸/);
+  assert.match(published.prompt, /不要把同尺寸的一批资源逐个独立/);
   assert.match(published.prompt, /线性尺寸比例不得超过 1\.7506/);
   assert.ok(Array.isArray(request.semanticCandidates));
   assert.ok(Array.isArray(request.classificationGuidance.requiredPasses));
+  assert.equal(request.classificationGuidance.signalPriority[1], '严格尺寸分组');
+  assert.match(request.classificationGuidance.standalonePolicy, /技能图标逐个独立/);
   const sizeLimits = request.classificationGuidance.sizeLimits;
   assert.equal(sizeLimits.maxLinearScaleRatio, 1.7506);
   assert.equal(sizeLimits.linearScaleDefinition, 'sqrt(width * height)');
@@ -1292,6 +1511,84 @@ test('AI classification may replace a size-only Component Set name with a semant
   assert.equal(componentSet.name, 'Controls/Close');
   const meta = JSON.parse(componentSet.getPluginData(META_KEY));
   assert.equal(meta.componentSetName, 'Controls/Close');
+});
+
+test('AI naming review renames an unchanged size-only Component Set in place', async () => {
+  const runtime = createRuntime();
+  const manifest = [
+    asset('common/reward_chest_open.png', 'common', 'reward_chest_open', 'h-open', 404, 404),
+    asset('common/reward_chest_closed.png', 'common', 'reward_chest_closed', 'h-closed', 404, 404)
+  ];
+  await importAll(runtime, manifest);
+
+  const section = runtime.section('common');
+  const componentSet = section.children.find((node) => node.type === 'COMPONENT_SET');
+  const originalSetId = componentSet.id;
+  const originalSetBounds = {
+    x: componentSet.x,
+    y: componentSet.y,
+    width: componentSet.width,
+    height: componentSet.height
+  };
+  const originalComponentIds = componentSet.children.map((node) => node.id).sort();
+  assert.equal(componentSet.name, '404x404');
+
+  await runtime.send('prepare-sync', {
+    rootName: 'library',
+    manifest,
+    classificationMode: 'ai'
+  });
+  const published = await runtime.send('publish-classification-request', {
+    selectedFolders: ['common']
+  });
+  const request = readSharedJson(runtime.figma.currentPage, 'classification-request');
+  assert.equal(request.componentSetRenameCandidates.length, 1);
+  assert.equal(request.componentSetRenameCandidates[0].nodeId, originalSetId);
+  assert.equal(request.componentSetRenameCandidates[0].currentName, '404x404');
+  assert.deepEqual(
+    request.componentSetRenameCandidates[0].members.map((member) => member.relativePath),
+    manifest.map((entry) => entry.relativePath).sort()
+  );
+  assert.equal(request.classificationGuidance.componentSetNaming.reviewUnchangedSizeOnlySets, true);
+  assert.match(published.prompt, /即使组件集成员完全不需要调整/);
+  assert.match(published.prompt, /完整 members 原样写入/);
+
+  writeSharedJson(runtime.figma.currentPage, 'classification-plan', {
+    schemaVersion: 1,
+    requestId: published.requestId,
+    groups: [{
+      id: 'reward-chest-state',
+      name: 'Reward Chest',
+      confidence: 0.98,
+      variantProperty: 'State',
+      members: manifest.map((entry) => entry.relativePath)
+    }],
+    standalone: []
+  });
+  const loaded = await runtime.send('load-classification-plan', {});
+  assert.equal(loaded.summary.move, 2);
+  assert.equal(loaded.summary.update, 0);
+
+  const begin = await runtime.send('begin-sync', {
+    selectedFolders: ['common'],
+    deleteMissing: true
+  });
+  assert.deepEqual(Array.from(begin.fileActions), []);
+  await runtime.send('finish-sync', {});
+
+  const renamedSet = runtime.section('common').children.find((node) => node.type === 'COMPONENT_SET');
+  assert.equal(renamedSet.id, originalSetId);
+  assert.equal(renamedSet.name, 'Reward Chest');
+  assert.deepEqual(
+    renamedSet.children.map((node) => node.id).sort(),
+    originalComponentIds
+  );
+  assert.deepEqual({
+    x: renamedSet.x,
+    y: renamedSet.y,
+    width: renamedSet.width,
+    height: renamedSet.height
+  }, originalSetBounds);
 });
 
 test('AI classification collapses legacy multi-property variants to one Property with resource-name values', async () => {
@@ -1817,7 +2114,7 @@ function createRuntime() {
   };
 
   const source = fs.readFileSync(path.join(ROOT, 'code.js'), 'utf8');
-  vm.runInNewContext(source, {
+  const sandbox = {
     figma,
     __html__: '',
     console,
@@ -1833,7 +2130,8 @@ function createRuntime() {
     Object,
     Error,
     setTimeout
-  });
+  };
+  vm.runInNewContext(source, sandbox);
 
   async function send(type, payload) {
     const id = `test-${++requestId}`;
@@ -1979,6 +2277,30 @@ function createRuntime() {
     return created;
   }
 
+  function packSections(rectangles, gap = 200) {
+    const ordered = rectangles
+      .map((rectangle, index) => ({ ...rectangle, sourceIndex: index }))
+      .sort(sandbox.compareSectionsForPacking);
+    const layout = sandbox.createAreaPackedSectionLayout(ordered, gap);
+    return ordered.map((rectangle, index) => ({
+      ...rectangle,
+      x: layout.positions[index].x,
+      y: layout.positions[index].y
+    }));
+  }
+
+  function packSectionsAtWidth(rectangles, targetWidth, gap = 200) {
+    const ordered = rectangles
+      .map((rectangle, index) => ({ ...rectangle, sourceIndex: index }))
+      .sort(sandbox.compareSectionsForPacking);
+    const layout = sandbox.packWithMaxRects(ordered, targetWidth, gap);
+    return ordered.map((rectangle, index) => ({
+      ...rectangle,
+      x: layout.positions[index].x,
+      y: layout.positions[index].y
+    }));
+  }
+
   return {
     figma,
     send,
@@ -1987,6 +2309,8 @@ function createRuntime() {
     component,
     componentSnapshot,
     createLegacyFolder,
-    createManagedFolder
+    createManagedFolder,
+    packSections,
+    packSectionsAtWidth
   };
 }

@@ -6,6 +6,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "graphify-out" / "ui-sync-preview.png"
 DETAIL_OUTPUT = ROOT / "graphify-out" / "ui-change-preview.png"
+ANOMALY_OUTPUT = ROOT / "graphify-out" / "ui-anomaly-preview.png"
 
 
 def main() -> None:
@@ -25,6 +26,28 @@ def main() -> None:
         page.wait_for_load_state("networkidle")
         page.evaluate(
             """
+            const previewSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" rx="8" fill="#1668e3"/><circle cx="16" cy="16" r="7" fill="#fff"/></svg>';
+            fileByPath = new Map([
+              ['common/home.png', new Blob([previewSvg], { type: 'image/svg+xml' })],
+              ['common/menu.png', new Blob([previewSvg], { type: 'image/svg+xml' })]
+            ]);
+            currentLocalResourceCount = 3829;
+            localResourceDiagnostics = [{
+              relativePath: 'common/exported/oversized.png',
+              folderPath: 'common',
+              name: 'oversized',
+              width: 64,
+              height: 64,
+              sourceSize: 13212057,
+              bytesPerPixel: 3225.6,
+              medianSize: 7124,
+              sizeRatio: 1854.9,
+              metadataBytes: 12478000,
+              metadataRatio: 0.9444,
+              metadataChunks: [{ type: 'iTXt', bytes: 12478000 }],
+              severity: 'high',
+              reasons: ['元数据占用 11.9 MB（94%）', '同尺寸资源中位数的 1855 倍']
+            }];
             renderPlan({
               rootName: 'game-assets',
               libraryId: 'preview-library',
@@ -40,10 +63,10 @@ def main() -> None:
               summary: { add: 24, update: 6, delete: 3, move: 2, unchanged: 418, conflict: 1 },
               actions: [
                 { type: 'add', folderPath: 'weather', relativePath: 'weather/day/sun.png', name: 'sun', width: 64, height: 64 },
-                { type: 'update', folderPath: 'common', relativePath: 'common/home.png', name: 'home', width: 32, height: 32, previousWidth: 24, previousHeight: 24 },
+                { type: 'update', folderPath: 'common', relativePath: 'common/home.png', name: 'home', width: 32, height: 32, previousWidth: 24, previousHeight: 24, componentSetKey: 'ai:common-controls', componentSetName: 'Controls/Common', variantProperty: 'Variant', previousComponentSetId: 'set-common' },
                 { type: 'delete', folderPath: 'legacy', relativePath: 'legacy/old.png', name: 'old', width: 40, height: 40, reason: 'missing-local' },
                 { type: 'move', folderPath: 'navigation', relativePath: 'navigation/arrows/back.png', oldRelativePath: 'navigation/old/back.png', name: 'back', width: 20, height: 20, previousWidth: 20, previousHeight: 20 },
-                { type: 'unchanged', folderPath: 'common', relativePath: 'common/menu.png', name: 'menu', width: 24, height: 24 },
+                { type: 'unchanged', folderPath: 'common', relativePath: 'common/menu.png', name: 'menu', width: 24, height: 24, componentSetKey: 'ai:common-controls', componentSetName: 'Controls/Common', variantProperty: 'Variant', previousComponentSetId: 'set-common' },
                 { type: 'conflict', folderPath: 'common', relativePath: 'common/duplicate.png', name: 'duplicate', width: 24, height: 24 }
               ],
               folders: [
@@ -83,6 +106,7 @@ def main() -> None:
         assert page.locator("#previewView").is_visible()
         assert page.locator('[data-preview-filter="update"]').get_attribute("aria-pressed") == "true"
         assert page.locator(".change-row.update").count() == 1
+        assert page.locator(".change-row img").count() == 0
         assert "24×24 → 32×32" in page.locator(".change-row.update .change-detail").inner_text()
         assert page.locator("#previewFolderFilter option").count() == 5
         page.locator("#previewSearch").fill("home")
@@ -93,12 +117,38 @@ def main() -> None:
         page.locator('[data-preview-filter="changes"]').click()
         assert page.locator(".change-row").count() == 5
         assert page.locator(".change-row.unchanged").count() == 0
+        assert page.locator(".change-row img").count() == 0
+        page.locator('[data-preview-filter="anomalies"]').click()
+        assert page.locator(".anomaly-row").count() == 1
+        assert page.locator(".anomaly-row img").count() == 0
+        assert "12.6 MB" in page.locator(".anomaly-size").inner_text()
+        assert "元数据 11.9 MB" in page.locator(".anomaly-metrics").inner_text()
+        assert "已检查 3829 个本地资源" in page.locator("#previewSubtitle").inner_text()
+        assert page.locator("#previewFolderFilter option").first.inner_text() == "所有本地文件夹"
+        page.screenshot(path=str(ANOMALY_OUTPUT), full_page=True)
+        page.locator('[data-preview-filter="componentSets"]').click()
+        assert page.locator(".component-set-card").count() == 1
+        assert not page.locator(".component-set-card").get_attribute("open")
+        assert page.locator(".component-set-card img").count() == 0
+        page.locator(".component-set-card summary").click()
+        assert page.locator(".component-set-card").get_attribute("open") is not None
+        page.wait_for_function(
+            "document.querySelectorAll('.component-member').length === 2"
+        )
+        assert page.locator(".component-member").count() == 2
+        assert page.locator(".component-set-card img").count() == 2
+        page.screenshot(path=str(DETAIL_OUTPUT), full_page=True)
+        page.locator(".component-set-card summary").click()
+        page.wait_for_function(
+            "document.querySelectorAll('.component-set-card img').length === 0"
+        )
+        assert page.locator(".component-set-card img").count() == 0
         page.locator('[data-preview-filter="move"]').click()
         assert "navigation/old/back.png" in page.locator(".change-row.move .change-path").inner_text()
         assert "navigation/arrows/back.png" in page.locator(".change-row.move .change-path").inner_text()
         page.locator('[data-preview-filter="unchanged"]').click()
         assert page.locator(".change-row.unchanged").count() == 1
-        page.screenshot(path=str(DETAIL_OUTPUT), full_page=True)
+        assert page.locator(".change-row img").count() == 0
         page.locator("#previewReturn").click()
         assert not page.locator("#previewView").is_visible()
         page.evaluate(
@@ -152,6 +202,49 @@ def main() -> None:
             """
         )
         assert newest_path == "common/new/home.png"
+        anomaly_result = page.evaluate(
+            """
+            async () => {
+              const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+              const makeChunk = (type, data) => {
+                const chunk = new Uint8Array(data.length + 12);
+                new DataView(chunk.buffer).setUint32(0, data.length, false);
+                for (let index = 0; index < 4; index++) chunk[4 + index] = type.charCodeAt(index);
+                chunk.set(data, 8);
+                return chunk;
+              };
+              const largeMetadata = new Uint8Array(300 * 1024);
+              const suspicious = new Blob([
+                signature,
+                makeChunk('IHDR', new Uint8Array(13)),
+                makeChunk('iTXt', largeMetadata),
+                makeChunk('IDAT', new Uint8Array(16)),
+                makeChunk('IEND', new Uint8Array(0))
+              ], { type: 'image/png' });
+              const normal = new Blob([
+                signature,
+                makeChunk('IHDR', new Uint8Array(13)),
+                makeChunk('IDAT', new Uint8Array(16)),
+                makeChunk('IEND', new Uint8Array(0))
+              ], { type: 'image/png' });
+              const entries = [
+                { relativePath: 'common/suspicious.png', folderPath: 'common', name: 'suspicious', width: 64, height: 64, sourceSize: suspicious.size },
+                { relativePath: 'common/normal-a.png', folderPath: 'common', name: 'normal-a', width: 64, height: 64, sourceSize: normal.size },
+                { relativePath: 'common/normal-b.png', folderPath: 'common', name: 'normal-b', width: 64, height: 64, sourceSize: normal.size }
+              ];
+              const files = new Map([
+                ['common/suspicious.png', suspicious],
+                ['common/normal-a.png', normal],
+                ['common/normal-b.png', normal]
+              ]);
+              return analyzeLocalResourceAnomalies(entries, files);
+            }
+            """
+        )
+        assert len(anomaly_result) == 1
+        assert anomaly_result[0]["relativePath"] == "common/suspicious.png"
+        assert anomaly_result[0]["severity"] == "high"
+        assert anomaly_result[0]["metadataBytes"] > 300 * 1024
         browser.close()
 
 

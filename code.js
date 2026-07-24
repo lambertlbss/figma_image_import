@@ -33,7 +33,7 @@ const SEMANTIC_GLYPH_TOKENS = new Set([
   'k', 'm', 'b'
 ]);
 
-const SECTION_GAP = 80;
+const SECTION_GAP = 200;
 const SECTION_PADDING = 192;
 const SECTION_CONTENT_TOP = 272;
 const ITEM_GAP = 100;
@@ -315,6 +315,7 @@ function publishClassificationRequest(payload) {
   const strictGroups = summarizeClassificationGroups(strict.manifest)
     .filter((group) => group.members.length >= 2);
   const semanticCandidates = buildSemanticClassificationCandidates(requestManifest);
+  const componentSetRenameCandidates = buildComponentSetRenameCandidates(requestManifest);
   const fileKey = figma.fileKey || null;
   const pageId = figma.currentPage.id;
   const pageName = figma.currentPage.name || null;
@@ -333,14 +334,18 @@ function publishClassificationRequest(payload) {
     assets,
     strictGroups,
     semanticCandidates,
+    componentSetRenameCandidates,
     classificationGuidance: {
-      candidatePrinciple: '严格尺寸只是候选来源和默认兜底，不是最终分类边界。',
+      candidatePrinciple: '严格尺寸分组是最高权重的初始分类和默认结果；AI 只能在此基础上做有充分证据的局部修正。',
       requiredPasses: [
-        '拆分同尺寸但语义、用途或视觉风格不同的资源',
-        '合并跨尺寸但目录、名称模板和视觉用途一致的系列资源',
+        '先完整审核 strictGroups，默认保留每个严格尺寸组及其成员',
+        '仅在名称模板、路径和视觉用途形成高置信证据时，拆分同尺寸但用途明确不同的资源',
+        '仅在同系列关系明确时，合并跨尺寸但名称模板、路径和视觉用途一致的资源',
         '全局检查同系列资源是否散落在多个尺寸组或只识别了一部分'
       ],
-      signalPriority: ['一级文件夹边界', '名称模板与变化槽位', '资源路径', '视觉风格', '尺寸关系'],
+      signalPriority: ['一级文件夹边界', '严格尺寸分组', '尺寸关系', '名称模板与变化槽位', '资源路径', '视觉风格'],
+      sameSizePolicy: '同一严格尺寸组默认保持为一个组件集；不能仅因名称前缀、编号或语义候选不同就拆散。',
+      standalonePolicy: '属于 strictGroups 的资源原则上不要写入 standalone；尤其不得把同尺寸的一批技能图标逐个独立。证据不足时省略，让其保留严格尺寸分类。',
       mergeRequirements: [
         '必须能说明明确的关系类型，例如状态、方向、品质、字形、动画帧、主题或样式',
         '相同目录、相同尺寸或通用名称前缀本身不足以支持合并',
@@ -354,7 +359,8 @@ function publishClassificationRequest(payload) {
         sizeOnlyExample: '23x32',
         renameSizeOnlyNames: true,
         preserveSemanticNames: true,
-        rule: '已有组件集名称只有在整个名称是“宽x高”尺寸占位符时才允许 AI 改名；其他名称必须原样保留。'
+        reviewUnchangedSizeOnlySets: true,
+        rule: '已有组件集名称只有在整个名称是“宽x高”尺寸占位符时才允许 AI 改名；其他名称必须原样保留。成员无需调整的纯尺寸组件集也要独立审核命名。'
       },
       fallback: '证据不足时不写入计划，让资源继续保持严格尺寸分类。'
     },
@@ -395,6 +401,7 @@ function publishClassificationRequest(payload) {
     selectedFolders: Array.from(selectedFolders),
     strictGroupCount: strictGroups.length,
     semanticCandidateCount: semanticCandidates.length,
+    componentSetRenameCandidateCount: componentSetRenameCandidates.length,
     namespace: SHARED_DATA_NAMESPACE,
     requestKey: CLASSIFICATION_REQUEST_KEY,
     planKey: CLASSIFICATION_PLAN_KEY,
@@ -423,6 +430,46 @@ function describeExistingComponentSet(component) {
     renameAllowed,
     namePolicy: renameAllowed ? 'rename-size-placeholder' : 'preserve-existing'
   };
+}
+
+function buildComponentSetRenameCandidates(manifest) {
+  const candidates = new Map();
+  if (!activeSync || !activeSync.index || !activeSync.index.components) return [];
+
+  for (const entry of manifest) {
+    const component = activeSync.index.components.get(entry.relativePath);
+    const componentSet = component && !component.removed &&
+      component.parent && component.parent.type === 'COMPONENT_SET'
+      ? component.parent
+      : null;
+    if (!componentSet || componentSet.removed || !isSizeOnlyComponentSetName(componentSet.name)) continue;
+    if (!candidates.has(componentSet.id)) {
+      candidates.set(componentSet.id, {
+        nodeId: componentSet.id,
+        folderPath: entry.folderPath,
+        currentName: String(componentSet.name || '').trim(),
+        members: []
+      });
+    }
+    candidates.get(componentSet.id).members.push({
+      relativePath: entry.relativePath,
+      name: entry.name,
+      width: entry.width,
+      height: entry.height
+    });
+  }
+
+  return Array.from(candidates.values())
+    .filter((candidate) => candidate.members.length >= 2)
+    .map((candidate) => ({
+      ...candidate,
+      members: candidate.members.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+    }))
+    .sort((a, b) =>
+      a.folderPath.localeCompare(b.folderPath) ||
+      a.currentName.localeCompare(b.currentName) ||
+      a.nodeId.localeCompare(b.nodeId)
+    );
 }
 
 function loadClassificationPlan() {
@@ -711,17 +758,22 @@ function buildClassificationPrompt(request) {
     `页面节点：${request.pageId}`,
     `读取 shared plugin data 索引：namespace="${SHARED_DATA_NAMESPACE}", key="${CLASSIFICATION_REQUEST_KEY}"。`,
     '该索引是 encoding="chunked-json" 的 JSON；按 chunkKeys 顺序读取所有分片，拼接字符串后 JSON.parse 得到请求。',
-    '严格尺寸候选组只是默认基线和兜底，不是最终分类边界。',
-    '必须做双向审核：拆分同尺寸但语义不同的资源；合并跨尺寸但名称模板、路径和视觉用途一致的系列资源。',
-    '先全局检查 request.semanticCandidates，再检查 strictGroups；semanticCandidates 只是可解释线索，不是必须照搬的最终分组。',
+    '尺寸权重最高：strictGroups 是必须先完整继承的初始分类和默认结果，后续 AI 调整只能建立在尺寸规则之上。',
+    '先审核 request.strictGroups，再用 request.semanticCandidates 寻找少量高置信例外；semanticCandidates 只是线索，不是必须照搬的最终分组。',
+    '必须做双向审核，但默认不动严格尺寸组：只有证据充分时才拆分同尺寸资源或合并跨尺寸系列。',
     '分析名称中的稳定部分和变化槽位，识别状态、方向、品质、数字/文字字形、动画帧、主题和样式系列。',
     '尺寸不同不能直接否决合并：字符宽度、状态资源、倍率资源和帧序列可能天然跨尺寸。',
     `但同一组件集的线性尺寸比例不得超过 ${AI_GROUP_MAX_LINEAR_SCALE_RATIO}（线性尺寸=sqrt(width*height)）。`,
     '超过尺寸限制的资源必须拆组或保持独立，不要写入同一个 AI 组件集。',
     '相同目录、相同尺寸或 common/bg/icon 等通用前缀本身不足以支持合并；每个 AI 组都应有明确且可解释的共同用途。',
+    '同一 strictGroup 内的资源不能仅因名称前缀、编号或 semanticCandidates 不同而拆散；技能图标等同尺寸资源默认继续保留在尺寸组件集中。',
+    '属于 strictGroups 的资源原则上不要写入 standalone；不要把同尺寸的一批资源逐个独立，证据不足时直接从方案中省略。',
     '完成分组后做全局遗漏检查，确认同一系列没有散落在其他尺寸组，也没有只识别一部分成员。',
     '每个组件集只使用一个 Variant Property；AI 可以调整 variantProperty，但 members 只填写资源路径。',
     '检查 request.assets[].existingComponentSet：已有组件集名称只有在整个名称是“宽x高”（如 23x32、35×36）尺寸占位符时才允许重命名。',
+    '必须逐个审核 request.componentSetRenameCandidates：即使组件集成员完全不需要调整，只要当前名称是纯尺寸占位名，也要尽量根据成员名称、路径和视觉用途提出语义名称。',
+    '仅优化名称时，仍需把该候选的完整 members 原样写入一个 group，并使用新的语义 name；不要为了改名拆分、合并或遗漏成员。',
+    '如果确实无法判断可靠语义，可以保留纯尺寸名；不要编造含义。',
     '已有组件集名称只要不是纯尺寸名，就必须原样保留；插件也会在读取方案时强制执行此规则。',
     '不要生成或修改每个资源的 Variant 值；插件会固定使用资源名作为 Variant 值。',
     '未写入 groups 或 standalone 的资源继续保持严格尺寸分类；不要跨一级文件夹合并资源。',
@@ -833,6 +885,17 @@ async function beginSync(payload) {
   activeSync.performance.startedAt = startedAt;
   activeSync.warnings = [];
   activeSync.started = true;
+
+  // Layout repair must not depend on a resource action being converted into a
+  // synthetic move. Legacy/copy-pasted Sections can retain their Section meta
+  // while their child metadata is missing, so select malformed Sections
+  // directly and guarantee that finishSync() will repack them.
+  for (const folderPath of activeSync.selectedFolders) {
+    const section = activeSync.index.sections.get(folderPath);
+    if (!sectionNeedsLayoutRepair(section, activeSync.libraryId)) continue;
+    activeSync.repairSections.add(section);
+    activeSync.touchedSections.add(section);
+  }
 
   const selectedActions = activeSync.plan.actions.filter((action) =>
     activeSync.selectedFolders.has(action.folderPath)
@@ -1172,7 +1235,8 @@ function applyAiClassificationPlan(manifest, plan) {
       assigned.add(entry.relativePath);
     }
     const id = safeClassificationId(rawGroup.id || rawGroup.name || entries[0].name);
-    const groupStorageKey = groupKey(entries[0].folderPath, `ai:${id}`);
+    const componentSetKey = resolveAiComponentSetKey(entries, id);
+    const groupStorageKey = groupKey(entries[0].folderPath, componentSetKey);
     if (usedGroupKeys.has(groupStorageKey)) {
       throw new Error(`AI 分类方案存在重复的组 ID：${id}`);
     }
@@ -1182,7 +1246,7 @@ function applyAiClassificationPlan(manifest, plan) {
     for (let index = 0; index < entries.length; index++) {
       const entry = entries[index];
       assignEntryClassification(entry, {
-        key: `ai:${id}`,
+        key: componentSetKey,
         name: componentSetName,
         property,
         value: entry.name,
@@ -1198,6 +1262,35 @@ function applyAiClassificationPlan(manifest, plan) {
     if (assigned.has(relativePath)) throw new Error(`资源同时出现在 AI 组件集与 standalone 中：${relativePath}`);
     assignEntryClassification(entry, null);
   }
+}
+
+function resolveAiComponentSetKey(entries, fallbackId) {
+  const fallbackKey = `ai:${fallbackId}`;
+  if (!activeSync || !activeSync.index || !activeSync.index.components) return fallbackKey;
+
+  const componentSets = new Set();
+  for (const entry of entries) {
+    const component = activeSync.index.components.get(entry.relativePath);
+    const componentSet = component && !component.removed &&
+      component.parent && component.parent.type === 'COMPONENT_SET'
+      ? component.parent
+      : null;
+    if (!componentSet || componentSet.removed) return fallbackKey;
+    componentSets.add(componentSet);
+  }
+  if (componentSets.size !== 1) return fallbackKey;
+
+  const componentSet = Array.from(componentSets)[0];
+  const existingPaths = componentSet.children
+    .filter((child) => child.type === 'COMPONENT' && !child.removed)
+    .map((child) => normalizeRelativePath((readMeta(child) || {}).relativePath))
+    .filter(Boolean);
+  const requestedPaths = entries.map((entry) => entry.relativePath);
+  if (existingPaths.length !== requestedPaths.length) return fallbackKey;
+  const requestedSet = new Set(requestedPaths);
+  if (!existingPaths.every((relativePath) => requestedSet.has(relativePath))) return fallbackKey;
+
+  return componentSetStorageKey(readMeta(componentSet), componentSet) || fallbackKey;
 }
 
 function validateAiGroupSize(entries, groupName) {
@@ -1321,7 +1414,13 @@ function componentResourceName(component, meta, relativePath) {
 
   const rawName = String(component && component.name || '').trim();
   const pairs = parseVariantName(rawName);
-  return pairs.length > 0 ? pairs[0].value : rawName;
+  if (pairs.length > 0) return pairs[0].value;
+
+  // Figma can turn a legacy variant into a standalone Component named
+  // "Component Set/Variant" when it leaves its original set. The slash is
+  // Figma's hierarchy separator, not part of the local resource filename.
+  const hierarchy = rawName.replace(/\\/g, '/').split('/').filter(Boolean);
+  return hierarchy.length > 1 ? hierarchy[hierarchy.length - 1] : rawName;
 }
 
 function parseVariantName(value) {
@@ -1899,11 +1998,23 @@ function promoteLayoutRepairActions(actions, index) {
 
 function sectionNeedsLayoutRepair(section, libraryId) {
   if (!section || section.removed) return false;
-  const managedNodes = section.children.filter((child) => isManagedSectionChild(child, libraryId));
-  if (managedNodes.some((node) =>
+  const layoutNodes = section.children.filter((child) => isSectionLayoutItem(child, libraryId));
+  if (layoutNodes.some((node) =>
     node.type === 'COMPONENT_SET' && componentSetNeedsLayoutRepair(node)
   )) return true;
-  if (nodesOverlap(managedNodes, ITEM_GAP)) return true;
+  if (nodesOverlap(layoutNodes, ITEM_GAP)) return true;
+  if (layoutNodes.length > 0) {
+    const minX = layoutNodes.reduce(
+      (min, node) => Math.min(min, node.x),
+      layoutNodes[0].x
+    );
+    const minY = layoutNodes.reduce(
+      (min, node) => Math.min(min, node.y),
+      layoutNodes[0].y
+    );
+    if (Math.abs(minX - SECTION_PADDING) > 1 ||
+        Math.abs(minY - SECTION_CONTENT_TOP) > 1) return true;
+  }
 
   let maxRight = 0;
   let maxBottom = 0;
@@ -2035,16 +2146,34 @@ function addAction(actions, actionByPath, action) {
 }
 
 function serializeAction(action) {
+  const entry = action.entry || null;
+  const componentSetKey = componentSetKeyForEntry(entry);
+  const usesComponentSet = Boolean(entry && componentSetKey && activeSync &&
+    activeSync.expectedComponentSetGroups &&
+    activeSync.expectedComponentSetGroups.has(groupKey(entry.folderPath, componentSetKey)));
+  const previousComponentSet = action.node && !action.node.removed &&
+    action.node.parent && action.node.parent.type === 'COMPONENT_SET'
+    ? action.node.parent
+    : null;
   return {
     type: action.type,
     folderPath: action.folderPath,
     relativePath: action.relativePath,
     oldRelativePath: action.oldRelativePath || null,
-    name: action.entry ? action.entry.name : (action.name || basenameWithoutExtension(action.relativePath)),
-    width: action.entry ? action.entry.width : (Number(action.previousWidth) || 0),
-    height: action.entry ? action.entry.height : (Number(action.previousHeight) || 0),
+    name: entry ? entry.name : (action.name || basenameWithoutExtension(action.relativePath)),
+    width: entry ? entry.width : (Number(action.previousWidth) || 0),
+    height: entry ? entry.height : (Number(action.previousHeight) || 0),
     previousWidth: Number(action.previousWidth) || 0,
     previousHeight: Number(action.previousHeight) || 0,
+    componentSetKey: usesComponentSet ? componentSetKey : null,
+    componentSetName: usesComponentSet
+      ? String(entry.componentSetName || componentSetKey)
+      : null,
+    variantProperty: usesComponentSet
+      ? String(entry.variantProperty || DEFAULT_VARIANT_PROPERTY)
+      : null,
+    previousComponentSetId: previousComponentSet ? previousComponentSet.id : null,
+    previousComponentSetName: previousComponentSet ? previousComponentSet.name : null,
     layoutOnly: action.layoutOnly === true,
     required: action.required === true,
     reason: action.reason || null
@@ -2658,32 +2787,53 @@ function compareVariantLayoutOrder(a, b) {
 
 async function relayoutManagedSection(section) {
   if (!section || section.removed || section.type !== 'SECTION') return;
-  const managedNodes = [];
+  const layoutNodes = [];
   const manualNodes = [];
 
   for (const child of section.children) {
-    if (isManagedSectionChild(child)) managedNodes.push(child);
+    if (isSectionLayoutItem(child)) layoutNodes.push(child);
     else manualNodes.push(child);
   }
 
-  if (managedNodes.length > 0) {
-    managedNodes.sort(compareSectionLayoutOrder);
-    const layout = createCompactPacking(managedNodes, ITEM_GAP);
-    const origin = chooseSectionLayoutOrigin(layout, manualNodes);
+  if (layoutNodes.length > 0) {
+    normalizeSectionChildrenToContentOrigin(section);
+    layoutNodes.sort(compareSectionLayoutOrder);
+    const arrangement = createComfortableSectionPacking(layoutNodes, ITEM_GAP, manualNodes);
+    const layout = arrangement.layout;
+    const origin = arrangement.origin;
     const yieldNodes = createMainThreadYielder();
-    for (let index = 0; index < managedNodes.length; index++) {
-      managedNodes[index].x = origin.x + layout.positions[index].x;
-      managedNodes[index].y = origin.y + layout.positions[index].y;
-      await yieldNodes(index + 1 < managedNodes.length, () => {
+    for (let index = 0; index < layoutNodes.length; index++) {
+      layoutNodes[index].x = origin.x + layout.positions[index].x;
+      layoutNodes[index].y = origin.y + layout.positions[index].y;
+      await yieldNodes(index + 1 < layoutNodes.length, () => {
         emitSyncProgress(section.name || '', 'section-layout', {
           completed: index + 1,
-          total: managedNodes.length
+          total: layoutNodes.length
         });
       });
     }
   }
 
   resizeSectionToContents(section);
+}
+
+function normalizeSectionChildrenToContentOrigin(section) {
+  if (!section || section.children.length === 0) return;
+  const minX = section.children.reduce(
+    (minimum, child) => Math.min(minimum, child.x),
+    section.children[0].x
+  );
+  const minY = section.children.reduce(
+    (minimum, child) => Math.min(minimum, child.y),
+    section.children[0].y
+  );
+  const offsetX = SECTION_PADDING - minX;
+  const offsetY = SECTION_CONTENT_TOP - minY;
+  if (Math.abs(offsetX) <= 1 && Math.abs(offsetY) <= 1) return;
+  for (const child of section.children) {
+    child.x += offsetX;
+    child.y += offsetY;
+  }
 }
 
 function isManagedSectionChild(node, libraryId) {
@@ -2695,6 +2845,12 @@ function isManagedSectionChild(node, libraryId) {
     const childMeta = readMeta(child) || {};
     return childMeta.role === 'component' && childMeta.libraryId === targetLibraryId;
   });
+}
+
+function isSectionLayoutItem(node, libraryId) {
+  if (!node || node.removed) return false;
+  if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') return true;
+  return isManagedSectionChild(node, libraryId);
 }
 
 function compareSectionLayoutOrder(a, b) {
@@ -2719,34 +2875,6 @@ function parseSizeKey(value) {
   const width = match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
   const height = match ? Number(match[2]) : Number.MAX_SAFE_INTEGER;
   return { width, height, area: width * height };
-}
-
-function chooseSectionLayoutOrigin(layout, manualNodes) {
-  if (manualNodes.length === 0) {
-    return { x: SECTION_PADDING, y: SECTION_CONTENT_TOP };
-  }
-
-  const manualRight = manualNodes.reduce((max, node) => Math.max(max, node.x + node.width), 0);
-  const manualBottom = manualNodes.reduce((max, node) => Math.max(max, node.y + node.height), 0);
-  const candidates = [
-    { x: SECTION_PADDING, y: Math.max(SECTION_CONTENT_TOP, manualBottom + ITEM_GAP) },
-    { x: Math.max(SECTION_PADDING, manualRight + ITEM_GAP), y: SECTION_CONTENT_TOP }
-  ];
-  let best = null;
-  let minimumArea = Infinity;
-
-  for (const candidate of candidates) {
-    candidate.requiredWidth = Math.max(manualRight, candidate.x + layout.width) + SECTION_PADDING;
-    candidate.requiredHeight = Math.max(manualBottom, candidate.y + layout.height) + SECTION_PADDING;
-    candidate.area = candidate.requiredWidth * candidate.requiredHeight;
-    minimumArea = Math.min(minimumArea, candidate.area);
-  }
-  for (const candidate of candidates) {
-    const ratio = candidate.requiredWidth / Math.max(1, candidate.requiredHeight);
-    const score = Math.abs(Math.log(ratio)) + (candidate.area / Math.max(1, minimumArea) - 1) * 0.18;
-    if (!best || score < best.score) best = { ...candidate, score };
-  }
-  return { x: best.x, y: best.y };
 }
 
 function resizeSectionToContents(section) {
@@ -2788,9 +2916,278 @@ function createNearSquareGrid(nodes, gap) {
   return best;
 }
 
-function createCompactPacking(nodes, gap) {
+function createCompactPacking(nodes, gap, options) {
   const count = nodes.length;
   if (count === 0) return { width: 0, height: 0, positions: [] };
+  const candidates = createShelfPackingCandidates(nodes, gap, options);
+  const occupiedArea = nodes.reduce((sum, node) => sum + node.width * node.height, 0);
+  const minimumArea = candidates.reduce(
+    (minimum, candidate) => Math.min(minimum, candidate.width * candidate.height),
+    Infinity
+  );
+
+  let best = null;
+  for (const candidate of candidates) {
+    const ratio = candidate.width / Math.max(1, candidate.height);
+    const aspect = Math.max(ratio, 1 / Math.max(ratio, 0.0001));
+    const unusedRatio = 1 - occupiedArea / Math.max(1, candidate.width * candidate.height);
+    const areaCost = candidate.width * candidate.height / Math.max(1, minimumArea) - 1;
+    const score =
+      Math.abs(Math.log(ratio)) * 1.45 +
+      Math.max(0, aspect - 1.3) * 0.65 +
+      areaCost * 0.2 +
+      unusedRatio * 0.2 +
+      candidate.rowImbalance * 0.18 +
+      candidate.orphanPenalty * 0.3;
+    if (!best || score < best.score) best = { ...candidate, score };
+  }
+  return best;
+}
+
+function createAreaPackedSectionLayout(nodes, gap) {
+  if (nodes.length === 0) return { width: 0, height: 0, positions: [] };
+  const candidates = createMaxRectsPackingCandidates(nodes, gap);
+  const occupiedArea = nodes.reduce((sum, node) => sum + node.width * node.height, 0);
+  const minimumArea = candidates.reduce(
+    (minimum, candidate) => Math.min(minimum, candidate.width * candidate.height),
+    Infinity
+  );
+
+  let best = null;
+  for (const candidate of candidates) {
+    const ratio = candidate.width / Math.max(1, candidate.height);
+    const aspect = Math.max(ratio, 1 / Math.max(ratio, 0.0001));
+    const unusedRatio = 1 - occupiedArea / Math.max(1, candidate.width * candidate.height);
+    const areaCost = candidate.width * candidate.height / Math.max(1, minimumArea) - 1;
+    const score =
+      areaCost * 0.62 +
+      unusedRatio * 0.72 +
+      Math.abs(Math.log(ratio)) * 0.06 +
+      Math.max(0, aspect - 2.2) * 0.22;
+    if (!best || score < best.score) best = { ...candidate, score };
+  }
+  return best;
+}
+
+function createMaxRectsPackingCandidates(nodes, gap) {
+  const paddedWidths = nodes.map((node) => node.width + gap);
+  const totalPaddedArea = nodes.reduce(
+    (sum, node) => sum + (node.width + gap) * (node.height + gap),
+    0
+  );
+  const widest = paddedWidths.reduce((max, width) => Math.max(max, width), 0);
+  const baseWidth = Math.max(widest, Math.sqrt(totalPaddedArea));
+  const widths = new Set([widest]);
+  for (const factor of [0.62, 0.72, 0.82, 0.92, 1, 1.1, 1.22, 1.36, 1.52, 1.72, 1.95, 2.2, 2.5]) {
+    widths.add(Math.max(widest, Math.round(baseWidth * factor)));
+  }
+
+  let accumulatedWidth = 0;
+  for (let index = 0; index < Math.min(nodes.length, 12); index++) {
+    accumulatedWidth += paddedWidths[index];
+    widths.add(Math.max(widest, accumulatedWidth));
+  }
+  return Array.from(widths, (width) => packWithMaxRects(nodes, width, gap));
+}
+
+function packWithMaxRects(nodes, targetWidth, gap) {
+  const maximumHeight = nodes.reduce((sum, node) => sum + node.height + gap, 0);
+  let freeRectangles = [{
+    x: 0,
+    y: 0,
+    width: targetWidth,
+    height: maximumHeight
+  }];
+  const positions = new Array(nodes.length);
+  let usedWidth = 0;
+  let usedHeight = 0;
+
+  for (let index = 0; index < nodes.length; index++) {
+    const paddedWidth = nodes[index].width + gap;
+    const paddedHeight = nodes[index].height + gap;
+    let best = null;
+    for (const free of freeRectangles) {
+      if (paddedWidth > free.width || paddedHeight > free.height) continue;
+      const horizontalRemainder = free.width - paddedWidth;
+      const verticalRemainder = free.height - paddedHeight;
+      const candidate = {
+        x: free.x,
+        y: free.y,
+        width: paddedWidth,
+        height: paddedHeight,
+        areaWaste: free.width * free.height - paddedWidth * paddedHeight,
+        shortSideWaste: Math.min(horizontalRemainder, verticalRemainder),
+        longSideWaste: Math.max(horizontalRemainder, verticalRemainder)
+      };
+      if (!best || compareMaxRectsPlacement(candidate, best) < 0) best = candidate;
+    }
+
+    if (!best) {
+      best = {
+        x: 0,
+        y: usedHeight + gap,
+        width: paddedWidth,
+        height: paddedHeight
+      };
+    }
+
+    positions[index] = { x: best.x, y: best.y };
+    usedWidth = Math.max(usedWidth, best.x + nodes[index].width);
+    usedHeight = Math.max(usedHeight, best.y + nodes[index].height);
+    freeRectangles = splitMaxRectsFreeSpace(freeRectangles, best);
+  }
+
+  return {
+    positions,
+    width: usedWidth,
+    height: usedHeight
+  };
+}
+
+function compareMaxRectsPlacement(left, right) {
+  return (
+    (left.shortSideWaste - right.shortSideWaste) ||
+    (left.longSideWaste - right.longSideWaste) ||
+    (left.areaWaste - right.areaWaste) ||
+    (left.y - right.y) ||
+    (left.x - right.x)
+  );
+}
+
+function splitMaxRectsFreeSpace(freeRectangles, used) {
+  const split = [];
+  for (const free of freeRectangles) {
+    const freeRight = free.x + free.width;
+    const freeBottom = free.y + free.height;
+    const usedRight = used.x + used.width;
+    const usedBottom = used.y + used.height;
+    const intersects =
+      used.x < freeRight &&
+      usedRight > free.x &&
+      used.y < freeBottom &&
+      usedBottom > free.y;
+    if (!intersects) {
+      split.push(free);
+      continue;
+    }
+
+    if (used.x > free.x) {
+      split.push({
+        x: free.x,
+        y: free.y,
+        width: used.x - free.x,
+        height: free.height
+      });
+    }
+    if (usedRight < freeRight) {
+      split.push({
+        x: usedRight,
+        y: free.y,
+        width: freeRight - usedRight,
+        height: free.height
+      });
+    }
+    if (used.y > free.y) {
+      split.push({
+        x: free.x,
+        y: free.y,
+        width: free.width,
+        height: used.y - free.y
+      });
+    }
+    if (usedBottom < freeBottom) {
+      split.push({
+        x: free.x,
+        y: usedBottom,
+        width: free.width,
+        height: freeBottom - usedBottom
+      });
+    }
+  }
+  return pruneContainedRectangles(split);
+}
+
+function pruneContainedRectangles(rectangles) {
+  return rectangles.filter((rectangle, index) => {
+    if (rectangle.width <= 0 || rectangle.height <= 0) return false;
+    for (let otherIndex = 0; otherIndex < rectangles.length; otherIndex++) {
+      if (index === otherIndex) continue;
+      const other = rectangles[otherIndex];
+      const contained =
+        rectangle.x >= other.x &&
+        rectangle.y >= other.y &&
+        rectangle.x + rectangle.width <= other.x + other.width &&
+        rectangle.y + rectangle.height <= other.y + other.height;
+      if (contained) {
+        const identical =
+          rectangle.x === other.x &&
+          rectangle.y === other.y &&
+          rectangle.width === other.width &&
+          rectangle.height === other.height;
+        if (!identical || otherIndex < index) return false;
+      }
+    }
+    return true;
+  });
+}
+
+function createComfortableSectionPacking(nodes, gap, manualNodes) {
+  const candidates = createShelfPackingCandidates(nodes, gap, { alignStart: true });
+  const occupiedArea = nodes.reduce((sum, node) => sum + node.width * node.height, 0);
+  const manualRight = manualNodes.reduce((max, node) => Math.max(max, node.x + node.width), 0);
+  const manualBottom = manualNodes.reduce((max, node) => Math.max(max, node.y + node.height), 0);
+  const placements = [];
+
+  for (const layout of candidates) {
+    const origins = manualNodes.length === 0
+      ? [{ x: SECTION_PADDING, y: SECTION_CONTENT_TOP }]
+      : [
+          { x: SECTION_PADDING, y: Math.max(SECTION_CONTENT_TOP, manualBottom + gap) },
+          { x: Math.max(SECTION_PADDING, manualRight + gap), y: SECTION_CONTENT_TOP }
+        ];
+    for (const origin of origins) {
+      const requiredWidth = Math.max(
+        360,
+        Math.max(manualRight, origin.x + layout.width) + SECTION_PADDING
+      );
+      const requiredHeight = Math.max(
+        320,
+        Math.max(manualBottom, origin.y + layout.height) + SECTION_PADDING
+      );
+      placements.push({
+        layout,
+        origin,
+        width: requiredWidth,
+        height: requiredHeight,
+        area: requiredWidth * requiredHeight
+      });
+    }
+  }
+
+  const minimumArea = placements.reduce(
+    (minimum, placement) => Math.min(minimum, placement.area),
+    Infinity
+  );
+  let best = null;
+  for (const placement of placements) {
+    const ratio = placement.width / Math.max(1, placement.height);
+    const aspect = Math.max(ratio, 1 / Math.max(ratio, 0.0001));
+    const layoutArea = placement.layout.width * placement.layout.height;
+    const unusedRatio = 1 - occupiedArea / Math.max(1, layoutArea);
+    const areaCost = placement.area / Math.max(1, minimumArea) - 1;
+    const score =
+      Math.abs(Math.log(ratio)) * 1.8 +
+      Math.max(0, aspect - 1.22) * 0.9 +
+      areaCost * 0.16 +
+      unusedRatio * 0.16 +
+      placement.layout.rowImbalance * 0.2 +
+      placement.layout.orphanPenalty * 0.38;
+    if (!best || score < best.score) best = { ...placement, score };
+  }
+  return { layout: best.layout, origin: best.origin };
+}
+
+function createShelfPackingCandidates(nodes, gap, options) {
   const totalArea = nodes.reduce(
     (sum, node) => sum + (node.width + gap) * (node.height + gap),
     0
@@ -2798,44 +3195,47 @@ function createCompactPacking(nodes, gap) {
   const widest = nodes.reduce((max, node) => Math.max(max, node.width), 0);
   const baseWidth = Math.max(widest, Math.sqrt(totalArea));
   const widths = new Set([widest]);
-  for (const factor of [0.7, 0.85, 1, 1.15, 1.35, 1.6, 1.9, 2.25]) {
+  for (const factor of [0.58, 0.68, 0.78, 0.88, 0.98, 1.08, 1.2, 1.35, 1.52, 1.72, 1.95, 2.25, 2.6]) {
     widths.add(Math.max(widest, Math.round(baseWidth * factor)));
   }
-
-  let best = null;
-  for (const width of widths) {
-    const candidate = packIntoShelves(nodes, width, gap);
-    const ratio = candidate.width / Math.max(1, candidate.height);
-    const occupiedArea = nodes.reduce((sum, node) => sum + node.width * node.height, 0);
-    const unusedRatio = 1 - occupiedArea / Math.max(1, candidate.width * candidate.height);
-    const score = Math.abs(Math.log(ratio)) + unusedRatio * 0.42;
-    if (!best || score < best.score) best = { ...candidate, score };
-  }
-  return best;
+  return Array.from(widths, (width) => packIntoShelves(nodes, width, gap, options));
 }
 
-function packIntoShelves(nodes, targetWidth, gap) {
+function packIntoShelves(nodes, targetWidth, gap, options) {
+  const preserveOrder = options && options.preserveOrder === true;
+  const alignStart = options && options.alignStart === true;
   const order = nodes
-    .map((node, index) => ({ node, index }))
-    .sort((a, b) =>
+    .map((node, index) => ({ node, index }));
+  if (!preserveOrder) {
+    order.sort((a, b) =>
       (b.node.height - a.node.height) ||
       (b.node.width - a.node.width) ||
       (b.node.width * b.node.height - a.node.width * a.node.height) ||
       (a.index - b.index)
     );
-  const positions = new Array(nodes.length);
+  }
+  const placements = new Array(nodes.length);
   const shelves = [];
   let usedWidth = 0;
   let usedHeight = 0;
 
   for (const item of order) {
     let selected = null;
-    for (const shelf of shelves) {
-      if (item.node.height > shelf.height || shelf.nextX + item.node.width > targetWidth) continue;
-      const heightWaste = shelf.height - item.node.height;
-      const widthWaste = targetWidth - (shelf.nextX + item.node.width);
-      const score = heightWaste * 2 + widthWaste;
-      if (!selected || score < selected.score) selected = { shelf, score };
+    if (preserveOrder && shelves.length > 0) {
+      const shelf = shelves[shelves.length - 1];
+      if (shelf.nextX + item.node.width <= targetWidth) {
+        shelf.height = Math.max(shelf.height, item.node.height);
+        usedHeight = Math.max(usedHeight, shelf.y + shelf.height);
+        selected = { shelf, score: 0 };
+      }
+    } else {
+      for (const shelf of shelves) {
+        if (item.node.height > shelf.height || shelf.nextX + item.node.width > targetWidth) continue;
+        const heightWaste = shelf.height - item.node.height;
+        const widthWaste = targetWidth - (shelf.nextX + item.node.width);
+        const score = heightWaste * 2 + widthWaste;
+        if (!selected || score < selected.score) selected = { shelf, score };
+      }
     }
 
     if (!selected) {
@@ -2847,7 +3247,10 @@ function packIntoShelves(nodes, targetWidth, gap) {
     }
 
     const shelf = selected.shelf;
-    positions[item.index] = { x: shelf.nextX, y: shelf.y };
+    placements[item.index] = {
+      x: shelf.nextX,
+      shelf
+    };
     shelf.nextX += item.node.width + gap;
     usedWidth = Math.max(usedWidth, shelf.nextX - gap);
   }
@@ -2856,7 +3259,29 @@ function packIntoShelves(nodes, targetWidth, gap) {
     (max, shelf) => Math.max(max, shelf.y + shelf.height),
     0
   );
-  return { positions, width: usedWidth, height };
+  const rowWidths = shelves.map((shelf) => Math.max(0, shelf.nextX - gap));
+  const positions = placements.map((placement, index) => {
+    const rowWidth = Math.max(0, placement.shelf.nextX - gap);
+    return {
+      x: placement.x + (alignStart ? 0 : (usedWidth - rowWidth) / 2),
+      y: placement.shelf.y + (alignStart ? 0 : (placement.shelf.height - nodes[index].height) / 2)
+    };
+  });
+  const rowFillRatios = rowWidths.map((width) => width / Math.max(1, usedWidth));
+  const rowImbalance = rowFillRatios.reduce(
+    (sum, fill) => sum + Math.pow(1 - fill, 2),
+    0
+  ) / Math.max(1, rowFillRatios.length);
+  const lastRowFill = rowFillRatios.length > 0 ? rowFillRatios[rowFillRatios.length - 1] : 1;
+  const orphanPenalty = shelves.length > 1 ? Math.max(0, 0.42 - lastRowFill) : 0;
+  return {
+    positions,
+    width: usedWidth,
+    height,
+    rows: shelves.length,
+    rowImbalance,
+    orphanPenalty
+  };
 }
 
 function measureGrid(nodes, columns, gap) {
@@ -2905,27 +3330,25 @@ function containingSection(node) {
 }
 
 async function layoutMovableSections() {
-  const candidates = new Map();
-  for (const section of activeSync.newSections) candidates.set(section.id, section);
-  for (const section of activeSync.repairSections) candidates.set(section.id, section);
-  const sections = Array.from(candidates.values())
-    .filter((section) => section && !section.removed)
-    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
-  if (sections.length === 0) return;
-  if (activeSync.newSections.size === 0 && sections.length === 1) return;
+  const requiresPageLayout =
+    activeSync.newSections.size > 0 ||
+    activeSync.repairSections.size > 0 ||
+    activeSync.touchedSections.size > 0;
+  if (!requiresPageLayout) return;
 
-  const movableIds = new Set(sections.map((section) => section.id));
-  const fixedSections = getTopLevelSections().filter((section) => !movableIds.has(section.id));
-  const layout = createCompactPacking(sections, SECTION_GAP);
-  const origin = fixedSections.length === 0
-    ? {
-        x: sections.reduce((min, section) => Math.min(min, section.x), sections[0].x),
-        y: sections.reduce((min, section) => Math.min(min, section.y), sections[0].y)
-      }
-    : {
-        x: fixedSections.reduce((min, section) => Math.min(min, section.x), fixedSections[0].x),
-        y: fixedSections.reduce((max, section) => Math.max(max, section.y + section.height), 0) + SECTION_GAP
-      };
+  const topLevelSections = getTopLevelSections();
+  const sections = topLevelSections
+    .filter((section) => isManagedLibrarySection(section))
+    .sort(compareSectionsForPacking);
+  if (sections.length < 2) return;
+
+  const fixedSections = topLevelSections.filter((section) => !isManagedLibrarySection(section));
+  const currentOrigin = {
+    x: sections.reduce((min, section) => Math.min(min, section.x), sections[0].x),
+    y: sections.reduce((min, section) => Math.min(min, section.y), sections[0].y)
+  };
+  const layout = createAreaPackedSectionLayout(sections, SECTION_GAP);
+  const origin = chooseManagedSectionClusterOrigin(layout, fixedSections, currentOrigin);
 
   const yieldSections = createMainThreadYielder();
   for (let index = 0; index < sections.length; index++) {
@@ -2933,6 +3356,69 @@ async function layoutMovableSections() {
     sections[index].y = origin.y + layout.positions[index].y;
     await yieldSections(index + 1 < sections.length);
   }
+}
+
+function compareSectionsForPacking(left, right) {
+  const leftArea = left.width * left.height;
+  const rightArea = right.width * right.height;
+  return (
+    (rightArea - leftArea) ||
+    (Math.max(right.width, right.height) - Math.max(left.width, left.height)) ||
+    (right.height - left.height) ||
+    (right.width - left.width) ||
+    String(left.name || '').localeCompare(String(right.name || ''))
+  );
+}
+
+function isManagedLibrarySection(section) {
+  if (!section || section.removed || section.type !== 'SECTION') return false;
+  const meta = readMeta(section) || {};
+  return meta.role === 'section' && meta.libraryId === activeSync.libraryId;
+}
+
+function chooseManagedSectionClusterOrigin(layout, fixedSections, currentOrigin) {
+  if (fixedSections.length === 0) return currentOrigin;
+
+  const fixedBounds = {
+    left: fixedSections.reduce((min, section) => Math.min(min, section.x), fixedSections[0].x),
+    top: fixedSections.reduce((min, section) => Math.min(min, section.y), fixedSections[0].y),
+    right: fixedSections.reduce((max, section) => Math.max(max, section.x + section.width), 0),
+    bottom: fixedSections.reduce((max, section) => Math.max(max, section.y + section.height), 0)
+  };
+  const candidates = [
+    {
+      x: fixedBounds.left,
+      y: fixedBounds.bottom + SECTION_GAP
+    },
+    {
+      x: fixedBounds.right + SECTION_GAP,
+      y: fixedBounds.top
+    }
+  ];
+  let minimumArea = Infinity;
+  for (const candidate of candidates) {
+    candidate.left = Math.min(fixedBounds.left, candidate.x);
+    candidate.top = Math.min(fixedBounds.top, candidate.y);
+    candidate.right = Math.max(fixedBounds.right, candidate.x + layout.width);
+    candidate.bottom = Math.max(fixedBounds.bottom, candidate.y + layout.height);
+    candidate.width = candidate.right - candidate.left;
+    candidate.height = candidate.bottom - candidate.top;
+    candidate.area = candidate.width * candidate.height;
+    minimumArea = Math.min(minimumArea, candidate.area);
+  }
+
+  let best = null;
+  for (const candidate of candidates) {
+    const ratio = candidate.width / Math.max(1, candidate.height);
+    const aspect = Math.max(ratio, 1 / Math.max(ratio, 0.0001));
+    const areaCost = candidate.area / Math.max(1, minimumArea) - 1;
+    const score =
+      Math.abs(Math.log(ratio)) * 1.3 +
+      Math.max(0, aspect - 1.35) * 0.45 +
+      areaCost * 0.22;
+    if (!best || score < best.score) best = { ...candidate, score };
+  }
+  return { x: best.x, y: best.y };
 }
 
 function createMainThreadYielder(maxItems, maxMilliseconds) {
